@@ -1,19 +1,18 @@
 #!/usr/bin/env python3
 """
 DNSSEC Chain-of-Trust Validator
-Mimics the Verisign DNSSEC Debugger (https://dnssec-debugger.verisignlabs.com)
 
 Validates the full chain: Trust Anchor → . → TLD → SLD → domain
 
 Usage:
-    python dnssec_checker.py <domain> [record_type]
+    python chainvalidator.py <domain> [record_type]
 
 Examples:
-    python dnssec_checker.py example.com
-    python dnssec_checker.py example.com AAAA
+    python chainvalidator.py example.com
+    python chainvalidator.py example.com AAAA
 
 Requirements:
-    pip install dnspython requests
+    pip install dnspython[dnssec] requests
 """
 
 from __future__ import annotations
