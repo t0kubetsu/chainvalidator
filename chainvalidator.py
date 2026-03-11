@@ -422,15 +422,26 @@ class DNSSECChecker:
             print(f"  {RED}  Validation FAILED — {len(self.errors)} error(s)")
             for e in self.errors:
                 print(f"     • {e}")
+        elif self.warnings:
+            # Warnings mean something is degraded (e.g. insecure delegation)
+            # but not outright broken — do NOT claim full success
+            print(
+                "  ⚠️   Validation completed with WARNINGS — chain is NOT fully secure"
+            )
         else:
             print(f"  {GREEN}  Full chain-of-trust validated successfully!")
+
         if self.warnings:
-            print(f"  ⚠️   {len(self.warnings)} warning(s)")
+            print(f"  ⚠️   {len(self.warnings)} warning(s):")
             for w in self.warnings:
                 print(f"     • {w}")
         print(f"{'=' * 70}\n")
 
-        return not bool(self.errors)
+        if self.errors:
+            return False  # bogus
+        if self.warnings:
+            return None  # insecure
+        return True  # fully secure
 
     # ── Zone list builder ─────────────────────────────────────────────────────
 
@@ -690,13 +701,68 @@ class DNSSECChecker:
             self._fail(str(exc))
             return False
 
+        # ── No DS = insecure delegation, not an error ─────────────────────────
         if not ds_rrset:
-            self._fail(
+            self._warn(
                 f"No DS records for {child_zone} in parent zone {parent_zone} "
-                f"— zone is unsigned or DS is missing"
+                f"— delegation is INSECURE (island of security)."
             )
-            return False
+            # Still fetch and internally verify the child's DNSKEYs + RRSIGs,
+            # but mark as insecure by NOT adding to validated_keys with full trust.
+            child_ns_list = self._resolve_ns_for_child(child_zone, parent_ns_ip)
+            if not child_ns_list:
+                self._fail(f"Could not resolve any nameserver for {child_zone}")
+                return False
 
+            print(f"\n  [DNSKEY check (insecure): {child_zone}]")
+            dnskey_rrset = rrsig_rrset = None
+            for ns_name, ns_ip in child_ns_list:
+                print(f"  Querying {ns_name} ({ns_ip}) for {child_zone} DNSKEY")
+                try:
+                    dnskey_rrset, rrsig_rrset = _get_dnskey(child_zone, ns_ip)
+                    if dnskey_rrset:
+                        break
+                except RuntimeError:
+                    continue
+
+            if not dnskey_rrset:
+                # Zone has no DNSKEY at all — unsigned, nothing more to check
+                self._warn(
+                    f"No DNSKEY records found for {child_zone} — zone is unsigned"
+                )
+                validated_keys[child_zone] = None  # sentinel: unsigned zone
+                return True  # not a hard failure, just unsigned
+
+            print(
+                f"  ⚠️   Found {len(dnskey_rrset)} DNSKEY record(s) for {child_zone} (unanchored)"
+            )
+            for dk in dnskey_rrset:
+                tag = dns.dnssec.key_id(dk)
+                kind = "KSK/SEP" if dk.flags & 0x0001 else "ZSK"
+                algo = _algo_name(dk.algorithm)
+                print(f"  {INFO}   keytag={tag}  type={kind}  algorithm={algo}")
+
+            # Verify internal RRSIG self-consistency even without DS anchor
+            if rrsig_rrset:
+                ok, key_tag_used = _validate_rrsig_over_rrset(
+                    dnskey_rrset, rrsig_rrset, dnskey_rrset, child_zone
+                )
+                if ok:
+                    print(
+                        f"  ⚠️   {_fmt_rrsig(rrsig_rrset[0])} and DNSKEY={key_tag_used}/SEP "
+                        f"verifies the DNSKEY RRset (internal only — not anchored)"
+                    )
+                else:
+                    self._warn(
+                        f"RRSIG over {child_zone} DNSKEY RRset could not be validated internally"
+                    )
+
+            validated_keys[child_zone] = (
+                dnskey_rrset  # store for RRset validation below
+            )
+            return True  # insecure but not bogus — continue
+
+        # ── DS found: full secure validation ─────────────────────────────────
         print(f"  {GREEN} Found {len(ds_rrset)} DS record(s) for {child_zone}")
         for ds in ds_rrset:
             algo_name = _algo_name(ds.algorithm)
@@ -1315,4 +1381,9 @@ if __name__ == "__main__":
 
     checker = DNSSECChecker(domain, record_type)
     success = checker.check()
-    sys.exit(0 if success else 1)
+    if success is True:
+        sys.exit(0)  # secure
+    elif success is None:
+        sys.exit(2)  # insecure delegation
+    else:
+        sys.exit(1)  # bogus / failed
