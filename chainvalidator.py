@@ -352,7 +352,7 @@ class DNSSECChecker:
 
         # Must have at least two labels (name + TLD), e.g. "example.com"
         # A bare single-label name like "example" is not a valid public domain.
-        non_empty_labels = [l for l in parsed.labels if l]
+        non_empty_labels = [l for l in parsed.labels if l]  # noqa: E741
         if len(non_empty_labels) < 2:
             print(
                 f"Error: '{domain}' is not a valid fully-qualified domain name. "
