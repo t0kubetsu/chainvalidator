@@ -47,6 +47,7 @@ logging.basicConfig(stream=sys.stdout, level=logging.WARNING, format="%(message)
 logger = logging.getLogger("dnssec")
 
 GREEN = "✅"
+YELLOW = "⚠️"
 RED = "❌"
 INFO = "   "
 
@@ -426,13 +427,13 @@ class DNSSECChecker:
             # Warnings mean something is degraded (e.g. insecure delegation)
             # but not outright broken — do NOT claim full success
             print(
-                "  ⚠️   Validation completed with WARNINGS — chain is NOT fully secure"
+                f"  {YELLOW}   Validation completed with WARNINGS — chain is NOT fully secure"
             )
         else:
             print(f"  {GREEN}  Full chain-of-trust validated successfully!")
 
         if self.warnings:
-            print(f"  ⚠️   {len(self.warnings)} warning(s):")
+            print(f"  {YELLOW}   {len(self.warnings)} warning(s):")
             for w in self.warnings:
                 print(f"     • {w}")
         print(f"{'=' * 70}\n")
@@ -734,7 +735,7 @@ class DNSSECChecker:
                 return True  # not a hard failure, just unsigned
 
             print(
-                f"  ⚠️   Found {len(dnskey_rrset)} DNSKEY record(s) for {child_zone} (unanchored)"
+                f"  {YELLOW}   Found {len(dnskey_rrset)} DNSKEY record(s) for {child_zone} (unanchored)"
             )
             for dk in dnskey_rrset:
                 tag = dns.dnssec.key_id(dk)
@@ -749,7 +750,7 @@ class DNSSECChecker:
                 )
                 if ok:
                     print(
-                        f"  ⚠️   {_fmt_rrsig(rrsig_rrset[0])} and DNSKEY={key_tag_used}/SEP "
+                        f"  {YELLOW}   {_fmt_rrsig(rrsig_rrset[0])} and DNSKEY={key_tag_used}/SEP "
                         f"verifies the DNSKEY RRset (internal only — not anchored)"
                     )
                 else:
@@ -1366,7 +1367,7 @@ class DNSSECChecker:
 
     def _warn(self, msg: str):
         self.warnings.append(msg)
-        print(f"  ⚠️  WARNING: {msg}")
+        print(f"  {YELLOW}  WARNING: {msg}")
 
 
 # ─── Entry point ──────────────────────────────────────────────────────────────
