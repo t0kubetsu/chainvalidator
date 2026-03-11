@@ -4,25 +4,61 @@ DNSSEC Chain-of-Trust Validator
 
 Validates the full chain: Trust Anchor → . → TLD → SLD → domain
 
-Usage:
-    python chainvalidator.py <domain> [record_type]
-
-Examples:
+CLI usage
+---------
     python chainvalidator.py example.com
-    python chainvalidator.py example.com AAAA
+    python chainvalidator.py example.com --type AAAA
+    python chainvalidator.py example.com --type MX --timeout 10
+    python chainvalidator.py example.com -l DEBUG
+    python chainvalidator.py example.com -l WARNING   # errors/warnings only
+    python chainvalidator.py example.com -l ERROR     # silent on success
 
-Requirements:
+Module usage
+------------
+    from chainvalidator import DNSSECChecker, validate
+    import logging
+
+    # The module uses the "dnssec" logger — attach a handler as needed:
+    logging.getLogger("dnssec").setLevel(logging.DEBUG)
+
+    # High-level one-shot helper
+    result = validate("example.com", record_type="A")
+    # result.status   → "secure" | "insecure" | "bogus"
+    # result.errors   → list[str]
+    # result.warnings → list[str]
+
+    # Low-level checker (same interface as before)
+    checker = DNSSECChecker("example.com", record_type="A")
+    ok = checker.check()   # True=secure, None=insecure, False=bogus
+
+Log levels used internally
+--------------------------
+    DEBUG    — per-query detail (NS chosen, keytag listings, RRSIG expiry …)
+    INFO     — chain-of-trust milestones (zone headers, DS/DNSKEY matches)
+    WARNING  — insecure delegations, NXDOMAIN, unsigned zones
+    ERROR    — validation failures (bogus chain)
+
+Exit codes (CLI)
+----------------
+    0  – fully secure
+    2  – insecure delegation (chain not anchored end-to-end)
+    1  – bogus / validation failed
+
+Requirements
+------------
     pip install dnspython[dnssec] requests
 """
 
 from __future__ import annotations
 
+import argparse
 import base64
 import hashlib
 import logging
 import secrets
 import sys
 import xml.etree.ElementTree as ET
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -41,15 +77,16 @@ import dns.rrset
 import requests
 from dns.rdata import Rdata
 
-# ─── Logging / output helpers ────────────────────────────────────────────────
+# ─── Logger ──────────────────────────────────────────────────────────────────
+# A single named logger for the whole module.  No handler is attached here so
+# that library callers retain full control.  The CLI configures a handler in
+# main() based on --log-level.
 
-logging.basicConfig(stream=sys.stdout, level=logging.WARNING, format="%(message)s")
-logger = logging.getLogger("dnssec")
+logger = logging.getLogger("chainvalidator")
 
 GREEN = "✅"
 YELLOW = "⚠️"
 RED = "❌"
-INFO = "   "
 
 ALGORITHM_MAP = {
     1: "RSAMD5",
@@ -90,6 +127,9 @@ ROOT_SERVERS = {
     "m.root-servers.net": "202.12.27.33",
 }
 
+DNS_TIMEOUT = 5  # seconds per UDP query (overridable via CLI / validate())
+DNS_PORT = 53
+
 
 def _pick_root_server() -> tuple[str, str]:
     """Randomly select a root name server using a cryptographically secure RNG.
@@ -102,8 +142,94 @@ def _pick_root_server() -> tuple[str, str]:
     return name, ROOT_SERVERS[name]
 
 
-DNS_TIMEOUT = 5  # seconds per UDP query
-DNS_PORT = 53
+# ─── Public module API ────────────────────────────────────────────────────────
+
+
+@dataclass
+class ValidationResult:
+    """Structured result returned by :func:`validate`.
+
+    Attributes
+    ----------
+    domain:
+        The fully-qualified domain name that was checked.
+    record_type:
+        The DNS record type that was validated (e.g. ``"A"``).
+    status:
+        One of ``"secure"``, ``"insecure"``, or ``"bogus"``.
+    errors:
+        List of error messages (non-empty only when *status* is ``"bogus"``).
+    warnings:
+        List of warning messages (non-empty when *status* is ``"insecure"``).
+    """
+
+    domain: str
+    record_type: str
+    status: str  # "secure" | "insecure" | "bogus"
+    errors: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+
+    @property
+    def is_secure(self) -> bool:
+        return self.status == "secure"
+
+    @property
+    def is_insecure(self) -> bool:
+        return self.status == "insecure"
+
+    @property
+    def is_bogus(self) -> bool:
+        return self.status == "bogus"
+
+
+def validate(
+    domain: str,
+    record_type: str = "A",
+    timeout: float = DNS_TIMEOUT,
+) -> ValidationResult:
+    """Validate the DNSSEC chain of trust for *domain*.
+
+    This is the recommended entry-point when using the module
+    programmatically.  It is a thin wrapper around :class:`DNSSECChecker`
+    that returns a :class:`ValidationResult` instead of a raw boolean.
+
+    Output is emitted via the ``"chainvalidator"`` :mod:`logging` logger.  Attach a
+    handler and set the desired level before calling if you want to see it::
+
+        import logging
+        logging.getLogger("chainvalidator").setLevel(logging.INFO)
+
+    Parameters
+    ----------
+    domain:
+        The domain name to validate (e.g. ``"example.com"``).
+    record_type:
+        DNS record type to validate at the leaf (default ``"A"``).
+    timeout:
+        Per-query UDP/TCP timeout in seconds (default ``5``).
+
+    Returns
+    -------
+    ValidationResult
+        Always returns a result; never raises on DNS / network errors
+        (those are captured in ``result.errors``).
+    """
+    checker = DNSSECChecker(domain, record_type=record_type, timeout=timeout)
+    raw = checker.check()
+    if raw is True:
+        status = "secure"
+    elif raw is None:
+        status = "insecure"
+    else:
+        status = "bogus"
+
+    return ValidationResult(
+        domain=checker.domain.rstrip("."),
+        record_type=record_type.upper(),
+        status=status,
+        errors=list(checker.errors),
+        warnings=list(checker.warnings),
+    )
 
 
 # ─── Low-level DNS helpers ────────────────────────────────────────────────────
@@ -157,42 +283,8 @@ def _extract_rrsets(
     return rrset, rrsig
 
 
-def _get_ns_for_zone(zone: str, parent_ns: str) -> list[tuple[str, str]]:
-    """
-    Query parent_ns for zone's NS records.
-    Returns list of (name, ip) tuples for the nameservers.
-    """
-    resp = _udp_query(zone, dns.rdatatype.NS, parent_ns)
-    ns_names: list[str] = []
-    for section in (resp.answer, resp.authority):
-        for rr in section:
-            if rr.rdtype == dns.rdatatype.NS:
-                ns_names = [r.target.to_text() for r in rr]
-                break
-        if ns_names:
-            break
-
-    # Resolve IPs from glue (additional section) or fall back to system resolver
-    glue: dict[str, str] = {}
-    for rr in resp.additional:
-        if rr.rdtype == dns.rdatatype.A:
-            glue[rr.name.to_text()] = rr[0].address
-
-    result: list[tuple[str, str]] = []
-    for name in ns_names:
-        if name in glue:
-            result.append((name, glue[name]))
-        else:
-            try:
-                ans = dns.resolver.resolve(name, "A")
-                result.append((name, ans[0].address))
-            except Exception:
-                pass
-    return result
-
-
 def _get_ds_from_parent(
-    zone: str, parent_ns: str
+    zone: str, parent_ns: str, timeout: float = DNS_TIMEOUT
 ) -> tuple[Optional[dns.rrset.RRset], Optional[dns.rrset.RRset]]:
     """Query parent_ns for zone's DS records + covering RRSIG."""
     resp = _udp_query(zone, dns.rdatatype.DS, parent_ns)
@@ -200,19 +292,11 @@ def _get_ds_from_parent(
 
 
 def _get_dnskey(
-    zone: str, ns: str
+    zone: str, ns: str, timeout: float = DNS_TIMEOUT
 ) -> tuple[Optional[dns.rrset.RRset], Optional[dns.rrset.RRset]]:
     """Query ns for zone's DNSKEY records + covering RRSIG."""
     resp = _udp_query(zone, dns.rdatatype.DNSKEY, ns)
     return _extract_rrsets(resp, dns.rdatatype.DNSKEY)
-
-
-def _get_rrset(
-    qname: str, rdtype: int, ns: str
-) -> tuple[Optional[dns.rrset.RRset], Optional[dns.rrset.RRset]]:
-    """Query ns for qname/rdtype + covering RRSIG."""
-    resp = _udp_query(qname, rdtype, ns)
-    return _extract_rrsets(resp, rdtype)
 
 
 # ─── Formatting helpers ───────────────────────────────────────────────────────
@@ -305,18 +389,6 @@ def _nsec3_covers(owner_b32: str, next_b32: str, target_b32: str) -> bool:
         return t > o or t < n
 
 
-def _nsec3_type_in_bitmap(nsec3_rd, rdtype: int) -> bool:
-    """Return True if rdtype is set in the NSEC3 type bitmap."""
-    window_num = rdtype >> 8
-    bit_index = rdtype & 0xFF
-    for win, bitmap in nsec3_rd.windows:
-        if win == window_num:
-            byte_idx, bit_pos = divmod(bit_index, 8)
-            if byte_idx < len(bitmap) and bitmap[byte_idx] & (0x80 >> bit_pos):
-                return True
-    return False
-
-
 def _nsec3_owner_hash(rr: dns.rrset.RRset, zone: str) -> str:
     """Extract the base32hex hash prefix from an NSEC3 owner name.
 
@@ -336,37 +408,59 @@ def _nsec3_owner_hash(rr: dns.rrset.RRset, zone: str) -> str:
 
 
 class DNSSECChecker:
-    """
-    Full DNSSEC chain-of-trust validator.
+    """Full DNSSEC chain-of-trust validator.
 
     Walks: Trust Anchor → root (.) → TLD → ... → target zone
     and validates each DS → DNSKEY → RRSIG link.
+
+    All diagnostic output is emitted via the ``"chainvalidator"`` :mod:`logging`
+    logger at the following levels:
+
+    * ``DEBUG``   — per-query detail (NS chosen, keytag listings, RRSIG expiry)
+    * ``INFO``    — chain-of-trust milestones (zone headers, DS/DNSKEY matches)
+    * ``WARNING`` — insecure delegations, NXDOMAIN, unsigned zones
+    * ``ERROR``   — validation failures (bogus chain)
+
+    Parameters
+    ----------
+    domain:
+        The domain name to validate.
+    record_type:
+        DNS record type to validate at the leaf (default ``"A"``).
+    timeout:
+        Per-query UDP/TCP timeout in seconds (default ``5``).
     """
 
-    def __init__(self, domain: str, record_type: str = "A"):
+    def __init__(
+        self,
+        domain: str,
+        record_type: str = "A",
+        timeout: float = DNS_TIMEOUT,
+    ):
         # Validate the domain name before doing anything
         try:
             parsed = dns.name.from_text(domain)
         except dns.exception.DNSException as exc:
-            print(f"Error: invalid domain name '{domain}': {exc}")
-            sys.exit(2)
+            raise ValueError(f"Invalid domain name '{domain}': {exc}") from exc
 
         # Must have at least two labels (name + TLD), e.g. "example.com"
         # A bare single-label name like "example" is not a valid public domain.
         non_empty_labels = [l for l in parsed.labels if l]  # noqa: E741
         if len(non_empty_labels) < 2:
-            print(
-                f"Error: '{domain}' is not a valid fully-qualified domain name. "
+            raise ValueError(
+                f"'{domain}' is not a valid fully-qualified domain name. "
                 f"Please include a TLD, e.g. '{domain}.com'."
             )
-            sys.exit(2)
 
         self.domain = parsed.to_text()  # canonical with trailing dot
+        self.timeout = timeout
+
         valid_types = {t.name for t in dns.rdatatype.RdataType}
         if record_type.upper() not in valid_types:
-            print(f"Error: unknown record type '{record_type}'.")
-            print(f"Known types: {', '.join(sorted(valid_types))}")
-            sys.exit(2)
+            raise ValueError(
+                f"Unknown record type '{record_type}'. "
+                f"Known types: {', '.join(sorted(valid_types))}"
+            )
         self.rdtype = dns.rdatatype.from_text(record_type)
         self.errors: list[str] = []
         self.warnings: list[str] = []
@@ -374,10 +468,21 @@ class DNSSECChecker:
     # ── Public entry point ────────────────────────────────────────────────────
 
     def check(self) -> bool:
+        """Run the full chain-of-trust validation.
+
+        Returns
+        -------
+        True
+            Chain is fully secure.
+        None
+            Chain has an insecure delegation (not fully anchored).
+        False
+            Chain is bogus (validation failure or hard error).
+        """
         domain_label = self.domain.rstrip(".")
-        print(f"\n{'=' * 70}")
-        print(f"  DNSSEC Validation for: {domain_label}")
-        print(f"{'=' * 70}\n")
+        logger.info("=" * 70)
+        logger.info("  DNSSEC Validation for: %s", domain_label)
+        logger.info("=" * 70)
 
         # Build zone hierarchy: ['.', 'com.', 'example.com.']
         zones = self._build_zone_list(self.domain)
@@ -394,15 +499,13 @@ class DNSSECChecker:
         validated_keys: dict[str, dns.rrset.RRset] = {}
 
         # ── Step 1: Root zone ─────────────────────────────────────────────────
-        root_ok = self._check_root(trust_anchor_ds, validated_keys)
-        if not root_ok:
+        if not self._check_root(trust_anchor_ds, validated_keys):
             return False
 
         # ── Steps 2..N: Each zone in the hierarchy ────────────────────────────
         for i in range(1, len(zones)):
             parent_zone = zones[i - 1]  # e.g. "."
             child_zone = zones[i]  # e.g. "com."
-
             ok = self._check_zone(
                 parent_zone=parent_zone,
                 child_zone=child_zone,
@@ -418,25 +521,26 @@ class DNSSECChecker:
             target_zone, validated_keys[target_zone], validated_keys=validated_keys
         )
 
-        print(f"\n{'=' * 70}")
+        logger.info("=" * 70)
         if self.errors:
-            print(f"  {RED}  Validation FAILED — {len(self.errors)} error(s)")
+            logger.error("%s  Validation FAILED — %d error(s)", RED, len(self.errors))
             for e in self.errors:
-                print(f"     • {e}")
+                logger.error("     • %s", e)
         elif self.warnings:
             # Warnings mean something is degraded (e.g. insecure delegation)
             # but not outright broken — do NOT claim full success
-            print(
-                f"  {YELLOW}   Validation completed with WARNINGS — chain is NOT fully secure"
+            logger.warning(
+                "%s   Validation completed with WARNINGS — chain is NOT fully secure",
+                YELLOW,
             )
         else:
-            print(f"  {GREEN}  Full chain-of-trust validated successfully!")
+            logger.info("%s  Full chain-of-trust validated successfully!", GREEN)
 
         if self.warnings:
-            print(f"  {YELLOW}   {len(self.warnings)} warning(s):")
+            logger.warning("%s   %d warning(s):", YELLOW, len(self.warnings))
             for w in self.warnings:
-                print(f"     • {w}")
-        print(f"{'=' * 70}\n")
+                logger.warning("     • %s", w)
+        logger.info("=" * 70)
 
         if self.errors:
             return False  # bogus
@@ -470,7 +574,6 @@ class DNSSECChecker:
 
         # ns_map: zone → list of (name, ip) for its authoritative NS
         self._zone_ns_map: dict[str, list[tuple[str, str]]] = {}
-
         root_ns = [_pick_root_server()]
         self._zone_ns_map["."] = root_ns
 
@@ -555,14 +658,14 @@ class DNSSECChecker:
     # ── Trust anchor ──────────────────────────────────────────────────────────
 
     def _load_trust_anchor(self) -> list[Rdata]:
-        print(f"{'─' * 70}")
-        print("  Trust Anchor (IANA root-anchors.xml)")
-        print(f"{'─' * 70}")
+        logger.info("─" * 70)
+        logger.info("  Trust Anchor (IANA root-anchors.xml)")
+        logger.info("─" * 70)
 
         try:
             xml_data = requests.get(
                 "https://data.iana.org/root-anchors/root-anchors.xml",
-                timeout=10,
+                timeout=self.timeout * 2,
             ).content
         except Exception as exc:
             self._fail(f"Could not fetch root-anchors.xml: {exc}")
@@ -595,11 +698,12 @@ class DNSSECChecker:
                 f"{keytag} {algorithm} {digest_type} {digest}",
             )
             active.append(ds)
-            algo_name = _algo_name(algorithm)
-            digest_name = DIGEST_MAP.get(digest_type, str(digest_type))
-            print(
-                f"  {GREEN} Trust anchor DS={keytag}/{digest_name} "
-                f"(algorithm {algo_name}) — active"
+            logger.info(
+                "  %s Trust anchor DS=%s/%s (algorithm %s) — active",
+                GREEN,
+                keytag,
+                DIGEST_MAP.get(digest_type, str(digest_type)),
+                _algo_name(algorithm),
             )
 
         if not active:
@@ -613,17 +717,17 @@ class DNSSECChecker:
         trust_anchor_ds: list[Rdata],
         validated_keys: dict,
     ) -> bool:
-        print(f"\n{'─' * 70}")
-        print("  Zone: . (root)")
-        print(f"{'─' * 70}")
+        logger.info("─" * 70)
+        logger.info("  Zone: . (root)")
+        logger.info("─" * 70)
 
         # Pick a root server
         root_ns_name, root_ns_ip = _pick_root_server()
+        logger.debug("  Fetching DNSKEY for . from %s (%s)", root_ns_name, root_ns_ip)
 
         # Fetch root DNSKEY + RRSIG
-        print(f"\n  Fetching DNSKEY for . from {root_ns_name} ({root_ns_ip})")
         try:
-            dnskey_rrset, rrsig_rrset = _get_dnskey(".", root_ns_ip)
+            dnskey_rrset, rrsig_rrset = _get_dnskey(".", root_ns_ip, self.timeout)
         except RuntimeError as exc:
             self._fail(str(exc))
             return False
@@ -632,20 +736,28 @@ class DNSSECChecker:
             self._fail("No DNSKEY records found for root zone")
             return False
 
-        print(f"  {GREEN} Found {len(dnskey_rrset)} DNSKEY record(s) for .")
+        logger.info("  %s Found %d DNSKEY record(s) for .", GREEN, len(dnskey_rrset))
         for dk in dnskey_rrset:
             tag = dns.dnssec.key_id(dk)
             kind = "KSK/SEP" if dk.flags & 0x0001 else "ZSK"
-            algo = _algo_name(dk.algorithm)
-            print(f"  {INFO}   keytag={tag}  type={kind}  algorithm={algo}")
+            logger.debug(
+                "      keytag=%s  type=%s  algorithm=%s",
+                tag,
+                kind,
+                _algo_name(dk.algorithm),
+            )
 
         # Verify each trust anchor DS against the root DNSKEYs
         any_matched = False
         for ta_ds in trust_anchor_ds:
             for dnskey in dnskey_rrset:
                 if _ds_matches_dnskey(ta_ds, dnskey, "."):
-                    tag = dns.dnssec.key_id(dnskey)
-                    print(f"  {GREEN} {_fmt_ds(ta_ds)} verifies {_fmt_dnskey(dnskey)}")
+                    logger.info(
+                        "  %s %s verifies %s",
+                        GREEN,
+                        _fmt_ds(ta_ds),
+                        _fmt_dnskey(dnskey),
+                    )
                     any_matched = True
 
         if not any_matched:
@@ -661,9 +773,11 @@ class DNSSECChecker:
             dnskey_rrset, rrsig_rrset, dnskey_rrset, "."
         )
         if ok:
-            print(
-                f"  {GREEN} {_fmt_rrsig(rrsig_rrset[0])} and DNSKEY={key_tag_used}/SEP "
-                f"verifies the DNSKEY RRset"
+            logger.info(
+                "  %s %s and DNSKEY=%s/SEP verifies the DNSKEY RRset",
+                GREEN,
+                _fmt_rrsig(rrsig_rrset[0]),
+                key_tag_used,
             )
         else:
             self._fail("RRSIG over root DNSKEY RRset could not be validated")
@@ -682,9 +796,9 @@ class DNSSECChecker:
         parent_validated_keys: dns.rrset.RRset,
         validated_keys: dict,
     ) -> bool:
-        print(f"\n{'─' * 70}")
-        print(f"  Zone: {child_zone}  (parent: {parent_zone})")
-        print(f"{'─' * 70}")
+        logger.info("─" * 70)
+        logger.info("  Zone: %s  (parent: %s)", child_zone, parent_zone)
+        logger.info("─" * 70)
 
         # ── 1. Get DS from parent ─────────────────────────────────────────────
         # Find a nameserver for the parent zone
@@ -693,16 +807,18 @@ class DNSSECChecker:
             self._fail(f"Could not find a nameserver for parent zone {parent_zone}")
             return False
 
-        print(f"\n  [DS check: {parent_zone} → {child_zone}]")
-        print(f"  Querying {parent_zone} NS for {child_zone} DS records")
+        logger.info("  [DS check: %s → %s]", parent_zone, child_zone)
+        logger.debug("  Querying %s NS for %s DS records", parent_zone, child_zone)
 
         try:
-            ds_rrset, ds_rrsig = _get_ds_from_parent(child_zone, parent_ns_ip)
+            ds_rrset, ds_rrsig = _get_ds_from_parent(
+                child_zone, parent_ns_ip, self.timeout
+            )
         except RuntimeError as exc:
             self._fail(str(exc))
             return False
 
-        # ── No DS = insecure delegation, not an error ─────────────────────────
+        # ── No DS = insecure delegation ───────────────────────────────────────
         if not ds_rrset:
             self._warn(
                 f"No DS records for {child_zone} in parent zone {parent_zone} "
@@ -715,12 +831,16 @@ class DNSSECChecker:
                 self._fail(f"Could not resolve any nameserver for {child_zone}")
                 return False
 
-            print(f"\n  [DNSKEY check (insecure): {child_zone}]")
+            logger.info("  [DNSKEY check (insecure): %s]", child_zone)
             dnskey_rrset = rrsig_rrset = None
             for ns_name, ns_ip in child_ns_list:
-                print(f"  Querying {ns_name} ({ns_ip}) for {child_zone} DNSKEY")
+                logger.debug(
+                    "  Querying %s (%s) for %s DNSKEY", ns_name, ns_ip, child_zone
+                )
                 try:
-                    dnskey_rrset, rrsig_rrset = _get_dnskey(child_zone, ns_ip)
+                    dnskey_rrset, rrsig_rrset = _get_dnskey(
+                        child_zone, ns_ip, self.timeout
+                    )
                     if dnskey_rrset:
                         break
                 except RuntimeError:
@@ -734,14 +854,21 @@ class DNSSECChecker:
                 validated_keys[child_zone] = None  # sentinel: unsigned zone
                 return True  # not a hard failure, just unsigned
 
-            print(
-                f"  {YELLOW}   Found {len(dnskey_rrset)} DNSKEY record(s) for {child_zone} (unanchored)"
+            logger.warning(
+                "  %s   Found %d DNSKEY record(s) for %s (unanchored)",
+                YELLOW,
+                len(dnskey_rrset),
+                child_zone,
             )
             for dk in dnskey_rrset:
                 tag = dns.dnssec.key_id(dk)
                 kind = "KSK/SEP" if dk.flags & 0x0001 else "ZSK"
-                algo = _algo_name(dk.algorithm)
-                print(f"  {INFO}   keytag={tag}  type={kind}  algorithm={algo}")
+                logger.debug(
+                    "      keytag=%s  type=%s  algorithm=%s",
+                    tag,
+                    kind,
+                    _algo_name(dk.algorithm),
+                )
 
             # Verify internal RRSIG self-consistency even without DS anchor
             if rrsig_rrset:
@@ -749,13 +876,17 @@ class DNSSECChecker:
                     dnskey_rrset, rrsig_rrset, dnskey_rrset, child_zone
                 )
                 if ok:
-                    print(
-                        f"  {YELLOW}   {_fmt_rrsig(rrsig_rrset[0])} and DNSKEY={key_tag_used}/SEP "
-                        f"verifies the DNSKEY RRset (internal only — not anchored)"
+                    logger.warning(
+                        "  %s   %s and DNSKEY=%s/SEP verifies the DNSKEY RRset "
+                        "(internal only — not anchored)",
+                        YELLOW,
+                        _fmt_rrsig(rrsig_rrset[0]),
+                        key_tag_used,
                     )
                 else:
                     self._warn(
-                        f"RRSIG over {child_zone} DNSKEY RRset could not be validated internally"
+                        f"RRSIG over {child_zone} DNSKEY RRset could not be "
+                        f"validated internally"
                     )
 
             validated_keys[child_zone] = (
@@ -764,13 +895,18 @@ class DNSSECChecker:
             return True  # insecure but not bogus — continue
 
         # ── DS found: full secure validation ─────────────────────────────────
-        print(f"  {GREEN} Found {len(ds_rrset)} DS record(s) for {child_zone}")
+        logger.info(
+            "  %s Found %d DS record(s) for %s", GREEN, len(ds_rrset), child_zone
+        )
         for ds in ds_rrset:
-            algo_name = _algo_name(ds.algorithm)
-            print(f"  {INFO}   {_fmt_ds(ds)}  algorithm={algo_name}")
-            print(
-                f"  {INFO}   {child_zone} IN DS ( {ds.key_tag} {ds.algorithm} "
-                f"{ds.digest_type} {ds.digest.hex()} )"
+            logger.info("      %s  algorithm=%s", _fmt_ds(ds), _algo_name(ds.algorithm))
+            logger.debug(
+                "      %s IN DS ( %s %s %s %s )",
+                child_zone,
+                ds.key_tag,
+                ds.algorithm,
+                ds.digest_type,
+                ds.digest.hex(),
             )
 
         # Verify RRSIG over DS using parent's validated keys
@@ -782,9 +918,11 @@ class DNSSECChecker:
             ds_rrset, ds_rrsig, parent_validated_keys, parent_zone
         )
         if ok:
-            print(
-                f"  {GREEN} {_fmt_rrsig(ds_rrsig[0])} and DNSKEY={key_tag_used} "
-                f"verifies the DS RRset"
+            logger.info(
+                "  %s %s and DNSKEY=%s verifies the DS RRset",
+                GREEN,
+                _fmt_rrsig(ds_rrsig[0]),
+                key_tag_used,
             )
         else:
             self._fail(
@@ -799,12 +937,12 @@ class DNSSECChecker:
             self._fail(f"Could not resolve any nameserver for {child_zone}")
             return False
 
-        print(f"\n  [DNSKEY check: {child_zone}]")
+        logger.info("  [DNSKEY check: %s]", child_zone)
         dnskey_rrset = rrsig_rrset = None
         for ns_name, ns_ip in child_ns_list:
-            print(f"  Querying {ns_name} ({ns_ip}) for {child_zone} DNSKEY")
+            logger.debug("  Querying %s (%s) for %s DNSKEY", ns_name, ns_ip, child_zone)
             try:
-                dnskey_rrset, rrsig_rrset = _get_dnskey(child_zone, ns_ip)
+                dnskey_rrset, rrsig_rrset = _get_dnskey(child_zone, ns_ip, self.timeout)
                 if dnskey_rrset:
                     break
             except RuntimeError:
@@ -814,20 +952,33 @@ class DNSSECChecker:
             self._fail(f"No DNSKEY records found for {child_zone}")
             return False
 
-        print(f"  {GREEN} Found {len(dnskey_rrset)} DNSKEY record(s) for {child_zone}")
+        logger.info(
+            "  %s Found %d DNSKEY record(s) for %s",
+            GREEN,
+            len(dnskey_rrset),
+            child_zone,
+        )
         for dk in dnskey_rrset:
             tag = dns.dnssec.key_id(dk)
             kind = "KSK/SEP" if dk.flags & 0x0001 else "ZSK"
-            algo = _algo_name(dk.algorithm)
-            print(f"  {INFO}   keytag={tag}  type={kind}  algorithm={algo}")
+            logger.debug(
+                "      keytag=%s  type=%s  algorithm=%s",
+                tag,
+                kind,
+                _algo_name(dk.algorithm),
+            )
 
         # ── 3. Verify DS matches DNSKEY ───────────────────────────────────────
         any_matched = False
         for ds in ds_rrset:
             for dnskey in dnskey_rrset:
                 if _ds_matches_dnskey(ds, dnskey, child_zone):
-                    tag = dns.dnssec.key_id(dnskey)
-                    print(f"  {GREEN} {_fmt_ds(ds)} verifies {_fmt_dnskey(dnskey)}")
+                    logger.info(
+                        "  %s %s verifies %s",
+                        GREEN,
+                        _fmt_ds(ds),
+                        _fmt_dnskey(dnskey),
+                    )
                     any_matched = True
 
         if not any_matched:
@@ -843,9 +994,11 @@ class DNSSECChecker:
             dnskey_rrset, rrsig_rrset, dnskey_rrset, child_zone
         )
         if ok:
-            print(
-                f"  {GREEN} {_fmt_rrsig(rrsig_rrset[0])} and DNSKEY={key_tag_used}/SEP "
-                f"verifies the DNSKEY RRset"
+            logger.info(
+                "  %s %s and DNSKEY=%s/SEP verifies the DNSKEY RRset",
+                GREEN,
+                _fmt_rrsig(rrsig_rrset[0]),
+                key_tag_used,
             )
         else:
             self._fail(f"RRSIG over {child_zone} DNSKEY RRset could not be validated")
@@ -884,13 +1037,13 @@ class DNSSECChecker:
             return False
 
         if qname is None:
-            qname = self.domain  # e.g. "data.iana.org."
+            qname = self.domain  # e.g. "www.example.com."
 
         rdtype_text = dns.rdatatype.to_text(self.rdtype)
 
-        print(f"\n{'─' * 70}")
-        print(f"  Record validation: {qname} {rdtype_text}")
-        print(f"{'─' * 70}")
+        logger.info("─" * 70)
+        logger.info("  Record validation: %s %s", qname, rdtype_text)
+        logger.info("─" * 70)
 
         ns_list = self._get_authoritative_ns(zone, zone_dnskeys)
         if not ns_list:
@@ -900,9 +1053,11 @@ class DNSSECChecker:
         # ── Query for the requested rdtype ────────────────────────────────────
         raw_resp = None
         for ns_name, ns_ip in ns_list:
-            print(f"\n  Querying {ns_name} ({ns_ip}) for {qname} {rdtype_text}")
+            logger.debug(
+                "  Querying %s (%s) for %s %s", ns_name, ns_ip, qname, rdtype_text
+            )
             try:
-                raw_resp = _udp_query(qname, self.rdtype, ns_ip)
+                raw_resp = _udp_query(qname, self.rdtype, ns_ip, timeout=self.timeout)
                 break
             except RuntimeError:
                 continue
@@ -931,9 +1086,15 @@ class DNSSECChecker:
 
         # ── Case 1: Got the record we wanted ──────────────────────────────────
         if rrset:
-            print(f"  {GREEN} Found {len(rrset)} {rdtype_text} record(s):")
+            logger.info("  %s Found %d %s record(s):", GREEN, len(rrset), rdtype_text)
             for r in rrset:
-                print(f"  {INFO}   {qname} {rrset.ttl} IN {rdtype_text} {r.to_text()}")
+                logger.info(
+                    "      %s %s IN %s %s",
+                    qname,
+                    rrset.ttl,
+                    rdtype_text,
+                    r.to_text(),
+                )
 
             if not rrsig_rrset:
                 self._fail(f"No RRSIG found over {qname} {rdtype_text} RRset")
@@ -943,9 +1104,12 @@ class DNSSECChecker:
                 rrset, rrsig_rrset, zone_dnskeys, zone
             )
             if ok:
-                print(
-                    f"  {GREEN} {_fmt_rrsig(rrsig_rrset[0])} and DNSKEY={key_tag_used} "
-                    f"verifies the {rdtype_text} RRset"
+                logger.info(
+                    "  %s %s and DNSKEY=%s verifies the %s RRset",
+                    GREEN,
+                    _fmt_rrsig(rrsig_rrset[0]),
+                    key_tag_used,
+                    rdtype_text,
                 )
             else:
                 self._fail(
@@ -964,16 +1128,18 @@ class DNSSECChecker:
                     )
                 else:
                     days_left = (exp - now).days
-                    print(
-                        f"  {GREEN} RRSIG expires {exp.strftime('%Y-%m-%d')} "
-                        f"({days_left} days remaining)"
+                    logger.debug(
+                        "  %s RRSIG expires %s (%d days remaining)",
+                        GREEN,
+                        exp.strftime("%Y-%m-%d"),
+                        days_left,
                     )
             return True
 
         # ── Case 2: Got a CNAME — validate it, then follow the chain ─────────
         if cname_rrset:
             cname_target = cname_rrset[0].target.to_text()
-            print(f"  {GREEN} {qname} is a CNAME to {cname_target}")
+            logger.info("  %s %s is a CNAME to %s", GREEN, qname, cname_target)
 
             # Validate the CNAME RRset with the current zone's keys
             if not cname_rrsig:
@@ -984,9 +1150,11 @@ class DNSSECChecker:
                 cname_rrset, cname_rrsig, zone_dnskeys, zone
             )
             if ok:
-                print(
-                    f"  {GREEN} {_fmt_rrsig(cname_rrsig[0])} and DNSKEY={key_tag_used} "
-                    f"verifies the CNAME RRset"
+                logger.info(
+                    "  %s %s and DNSKEY=%s verifies the CNAME RRset",
+                    GREEN,
+                    _fmt_rrsig(cname_rrsig[0]),
+                    key_tag_used,
                 )
             else:
                 self._fail(f"RRSIG over {qname} CNAME RRset could not be validated")
@@ -994,7 +1162,7 @@ class DNSSECChecker:
 
             # Walk the zone chain for the CNAME target, reusing any zones
             # already validated in this session (root, TLD, etc.)
-            print(f"\n  Following CNAME → {cname_target}")
+            logger.info("  Following CNAME → %s", cname_target)
             target_zones = self._build_zone_list(cname_target)
 
             # Share the caller's validated_keys dict so already-done zones
@@ -1026,10 +1194,7 @@ class DNSSECChecker:
                 validated_keys=shared_keys,
             )
 
-        # ── Case 3: Empty answer — check authority for NSEC NODATA proof ────────
-        # RCODE=NOERROR + empty answer + NSEC in authority = cryptographic proof
-        # that no records of this type exist.  Validate the NSEC RRset and report
-        # success (the name exists but has no A/AAAA/etc. record of this type).
+        # ── Case 3: NODATA — check NSEC denial proof ──────────────────────────
         nsec_rrset = nsec_rrsig = None
         for rr in raw_resp.authority:
             if rr.rdtype == dns.rdatatype.NSEC and rr.name == dns.name.from_text(qname):
@@ -1040,7 +1205,7 @@ class DNSSECChecker:
                         nsec_rrsig = rr
 
         if nsec_rrset and raw_resp.rcode() == dns.rcode.NOERROR:
-            print("  Checking NSEC records for a NODATA response")
+            logger.info("  Checking NSEC records for a NODATA response")
 
             if not nsec_rrsig:
                 self._fail(f"No RRSIG found over {qname} NSEC RRset")
@@ -1050,9 +1215,11 @@ class DNSSECChecker:
                 nsec_rrset, nsec_rrsig, zone_dnskeys, zone
             )
             if ok:
-                print(
-                    f"  {GREEN} {_fmt_rrsig(nsec_rrsig[0])} and DNSKEY={key_tag_used} "
-                    f"verifies the NSEC RRset"
+                logger.info(
+                    "  %s %s and DNSKEY=%s verifies the NSEC RRset",
+                    GREEN,
+                    _fmt_rrsig(nsec_rrsig[0]),
+                    key_tag_used,
                 )
             else:
                 self._fail(f"RRSIG over {qname} NSEC RRset could not be validated")
@@ -1079,9 +1246,11 @@ class DNSSECChecker:
                 )
                 return False
 
-            print(
-                f"  {GREEN} NSEC proves no records of type {rdtype_text} "
-                f"exist for {qname}"
+            logger.info(
+                "  %s NSEC proves no records of type %s exist for %s",
+                GREEN,
+                rdtype_text,
+                qname,
             )
 
             # Also validate the signed SOA in the authority section, which
@@ -1100,9 +1269,11 @@ class DNSSECChecker:
                     soa_rrset, soa_rrsig, zone_dnskeys, zone
                 )
                 if ok:
-                    print(
-                        f"  {GREEN} {_fmt_rrsig(soa_rrsig[0])} and DNSKEY={key_tag_used} "
-                        f"verifies the SOA RRset"
+                    logger.info(
+                        "  %s %s and DNSKEY=%s verifies the SOA RRset",
+                        GREEN,
+                        _fmt_rrsig(soa_rrsig[0]),
+                        key_tag_used,
                     )
                 else:
                     self._fail(f"RRSIG over {zone} SOA RRset could not be validated")
@@ -1110,9 +1281,9 @@ class DNSSECChecker:
 
             return True
 
-        # ── Case 4: NXDOMAIN — the name does not exist ───────────────────────
+        # ── Case 4: NXDOMAIN ──────────────────────────────────────────────────
         if raw_resp.rcode() == dns.rcode.NXDOMAIN:
-            print(f"  Zone {zone} returns NXDOMAIN for {qname}")
+            logger.info("  Zone %s returns NXDOMAIN for %s", zone, qname)
 
             # Validate signed SOA first (zone integrity)
             soa_rrset = soa_rrsig = None
@@ -1129,9 +1300,11 @@ class DNSSECChecker:
                     soa_rrset, soa_rrsig, zone_dnskeys, zone
                 )
                 if ok:
-                    print(
-                        f"  {GREEN} {_fmt_rrsig(soa_rrsig[0])} and DNSKEY={key_tag_used} "
-                        f"verifies the SOA RRset"
+                    logger.info(
+                        "  %s %s and DNSKEY=%s verifies the SOA RRset",
+                        GREEN,
+                        _fmt_rrsig(soa_rrsig[0]),
+                        key_tag_used,
                     )
                 else:
                     self._fail(f"RRSIG over {zone} SOA RRset could not be validated")
@@ -1142,17 +1315,16 @@ class DNSSECChecker:
                 rr for rr in raw_resp.authority if rr.rdtype == dns.rdatatype.NSEC3
             ]
             if nsec3_rrs:
-                nsec3_ok = self._validate_nsec3_nxdomain(
+                if not self._validate_nsec3_nxdomain(
                     qname, zone, raw_resp.authority, zone_dnskeys
-                )
-                if not nsec3_ok:
+                ):
                     return False
 
             self._warn(f"NXDOMAIN: {qname} does not exist in zone {zone}")
             return False
 
         # No NSEC proof and no answer — genuine failure
-        print(f"  {RED} No {rdtype_text} record found for {qname}")
+        logger.error("  %s No %s record found for %s", RED, rdtype_text, qname)
         self._fail(f"No {rdtype_text} record for {qname}")
         return False
 
@@ -1196,9 +1368,10 @@ class DNSSECChecker:
         first_rd = next(iter(nsec3_map.values()))[1]
         iterations = first_rd.iterations
         salt_hex = first_rd.salt.hex() if first_rd.salt else "-"
-        print(
-            f"  Checking NSEC3 records (iterations={iterations}, "
-            f"salt={'- ' if salt_hex == '-' else salt_hex})"
+        logger.debug(
+            "  Checking NSEC3 records (iterations=%d, salt=%s)",
+            iterations,
+            "- " if salt_hex == "-" else salt_hex,
         )
 
         def validate_nsec3_rrset(owner_hash: str, label: str) -> bool:
@@ -1212,9 +1385,12 @@ class DNSSECChecker:
                 return False
             ok, key_tag = _validate_rrsig_over_rrset(rrset, rrsig, zone_dnskeys, zone)
             if ok:
-                print(
-                    f"  {GREEN} {_fmt_rrsig(rrsig[0])} and DNSKEY={key_tag} "
-                    f"verifies the NSEC3 RRset ({label})"
+                logger.info(
+                    "  %s %s and DNSKEY=%s verifies the NSEC3 RRset (%s)",
+                    GREEN,
+                    _fmt_rrsig(rrsig[0]),
+                    key_tag,
+                    label,
                 )
             else:
                 self._fail(
@@ -1244,7 +1420,12 @@ class DNSSECChecker:
             h = _nsec3_hash(candidate, salt_hex, iterations)
             if h in nsec3_map:
                 closest_encloser = candidate
-                print(f"  {GREEN} Closest encloser: {candidate} (hash {h[:16]}…)")
+                logger.info(
+                    "  %s Closest encloser: %s (hash %s…)",
+                    GREEN,
+                    candidate,
+                    h[:16],
+                )
                 if not validate_nsec3_rrset(h, f"closest encloser {candidate}"):
                     return False
                 break
@@ -1265,9 +1446,11 @@ class DNSSECChecker:
             nc_hash = _nsec3_hash(next_closer, salt_hex, iterations)
             covering = find_covering(nc_hash)
             if covering:
-                print(
-                    f"  {GREEN} Next closer name {next_closer} "
-                    f"(hash {nc_hash[:16]}…) is covered by NSEC3"
+                logger.info(
+                    "  %s Next closer name %s (hash %s…) is covered by NSEC3",
+                    GREEN,
+                    next_closer,
+                    nc_hash[:16],
                 )
                 if not validate_nsec3_rrset(covering, f"next closer {next_closer}"):
                     return False
@@ -1284,9 +1467,11 @@ class DNSSECChecker:
             self._fail(f"Wildcard {wildcard} exists but NXDOMAIN was returned")
             return False
         if wc_covering:
-            print(
-                f"  {GREEN} Wildcard {wildcard} (hash {wc_hash[:16]}…) "
-                f"is covered by NSEC3 — no wildcard expansion"
+            logger.info(
+                "  %s Wildcard %s (hash %s…) is covered by NSEC3 — no wildcard expansion",
+                GREEN,
+                wildcard,
+                wc_hash[:16],
             )
             if not validate_nsec3_rrset(wc_covering, f"wildcard {wildcard}"):
                 return False
@@ -1315,7 +1500,9 @@ class DNSSECChecker:
         then resolve IPs.
         """
         try:
-            resp = _udp_query(child_zone, dns.rdatatype.NS, parent_ns_ip)
+            resp = _udp_query(
+                child_zone, dns.rdatatype.NS, parent_ns_ip, timeout=self.timeout
+            )
         except RuntimeError:
             return []
 
@@ -1359,32 +1546,119 @@ class DNSSECChecker:
             return [_pick_root_server()]
         return []
 
-    # ── Error recording ───────────────────────────────────────────────────────
+    # ── Error / warning recording ─────────────────────────────────────────────
 
-    def _fail(self, msg: str):
+    def _fail(self, msg: str) -> None:
         self.errors.append(msg)
-        print(f"  {RED} ERROR: {msg}")
+        logger.error("  %s ERROR: %s", RED, msg)
 
-    def _warn(self, msg: str):
+    def _warn(self, msg: str) -> None:
         self.warnings.append(msg)
-        print(f"  {YELLOW}  WARNING: {msg}")
+        logger.warning("  %s  WARNING: %s", YELLOW, msg)
 
 
-# ─── Entry point ──────────────────────────────────────────────────────────────
+# ─── CLI ──────────────────────────────────────────────────────────────────────
+
+_LOG_LEVELS = ["DEBUG", "INFO", "WARNING", "ERROR"]
+_DEFAULT_LOG_LEVEL = "INFO"
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="chainvalidator",
+        description=(
+            "DNSSEC Chain-of-Trust Validator\n\n"
+            "Validates the full chain: Trust Anchor → . → TLD → SLD → domain"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+log levels:
+  DEBUG    per-query detail (NS chosen, keytag listings, RRSIG expiry …)
+  INFO     chain-of-trust milestones — default
+  WARNING  insecure delegations and unsigned zones only
+  ERROR    failures only (silent on success)
+
+examples:
+  %(prog)s example.com
+  %(prog)s example.com -t AAAA
+  %(prog)s example.com -t MX --timeout 10
+  %(prog)s example.com -l DEBUG
+  %(prog)s example.com -l WARNING
+
+exit codes:
+  0  fully secure
+  2  insecure delegation (chain not anchored end-to-end)
+  1  bogus / validation failed
+        """,
+    )
+
+    parser.add_argument(
+        "domain",
+        metavar="DOMAIN",
+        help="domain name to validate (e.g. example.com)",
+    )
+    parser.add_argument(
+        "-t",
+        "--type",
+        metavar="TYPE",
+        dest="record_type",
+        default="A",
+        help="DNS record type to validate at the leaf (default: A)",
+    )
+    parser.add_argument(
+        "--timeout",
+        metavar="SECONDS",
+        type=float,
+        default=DNS_TIMEOUT,
+        help=f"per-query UDP/TCP timeout in seconds (default: {DNS_TIMEOUT})",
+    )
+    parser.add_argument(
+        "-l",
+        "--log-level",
+        metavar="LEVEL",
+        dest="log_level",
+        default=_DEFAULT_LOG_LEVEL,
+        choices=_LOG_LEVELS,
+        help=(
+            f"logging verbosity: {', '.join(_LOG_LEVELS)} "
+            f"(default: {_DEFAULT_LOG_LEVEL})"
+        ),
+    )
+
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    """CLI entry-point.  Returns the exit code (0 / 1 / 2)."""
+    parser = _build_parser()
+    args = parser.parse_args(argv)
+
+    # Configure the "chainvalidator" logger for CLI use only.
+    # Library callers who import the module get no handler by default
+    # (standard Python logging practice — caller controls their own handlers).
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    logger.addHandler(handler)
+    logger.setLevel(getattr(logging, args.log_level))
+
+    try:
+        checker = DNSSECChecker(
+            args.domain,
+            record_type=args.record_type,
+            timeout=args.timeout,
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
+
+    raw = checker.check()
+
+    if raw is True:
+        return 0  # secure
+    elif raw is None:
+        return 2  # insecure
+    else:
+        return 1  # bogus
+
 
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print(__doc__)
-        sys.exit(2)
-
-    domain = sys.argv[1]
-    record_type = sys.argv[2] if len(sys.argv) > 2 else "A"
-
-    checker = DNSSECChecker(domain, record_type)
-    success = checker.check()
-    if success is True:
-        sys.exit(0)  # secure
-    elif success is None:
-        sys.exit(2)  # insecure delegation
-    else:
-        sys.exit(1)  # bogus / failed
+    sys.exit(main())
