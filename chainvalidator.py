@@ -455,11 +455,11 @@ class DNSSECChecker:
         the authoritative NS IPs for each zone, so downstream methods can query
         the correct servers.
 
-            nc3.lu             → ['.', 'lu.', 'nc3.lu.']
-            observatory.nc3.lu → ['.', 'lu.', 'nc3.lu.']
+            example.com     → ['.', 'com.', 'example.com.']
+            www.example.com → ['.', 'com.', 'example.com.']
         """
         name = dns.name.from_text(fqdn)
-        labels = name.labels  # e.g. (b'observatory', b'nc3', b'lu', b'')
+        labels = name.labels  # e.g. (b'www', b'example', b'com', b'')
 
         # Ordered candidate zones from TLD down to fqdn itself
         candidates: list[str] = []
