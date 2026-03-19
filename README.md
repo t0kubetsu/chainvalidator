@@ -32,6 +32,7 @@ $ chainvalidator check example.com
 - [Logging](#logging)
 - [Exit Codes](#exit-codes)
 - [Project Structure](#project-structure)
+- [Running Tests](#running-tests)
 
 ---
 
@@ -141,22 +142,22 @@ logging.getLogger("chainvalidator").addHandler(handler)
 logging.getLogger("chainvalidator").setLevel(logging.DEBUG)
 ```
 
-| Level | Content |
-|---|---|
-| `DEBUG` | Per-query detail: NS selection, keytag listings, RRSIG expiry |
-| `INFO` | Chain milestones: zone headers, DS/DNSKEY matches, final verdict |
-| `WARNING` | Insecure delegations, unsigned zones, NXDOMAIN |
-| `ERROR` | Hard validation failures (bogus chain) |
+| Level     | Content                                                          |
+| --------- | ---------------------------------------------------------------- |
+| `DEBUG`   | Per-query detail: NS selection, keytag listings, RRSIG expiry    |
+| `INFO`    | Chain milestones: zone headers, DS/DNSKEY matches, final verdict |
+| `WARNING` | Insecure delegations, unsigned zones, NXDOMAIN                   |
+| `ERROR`   | Hard validation failures (bogus chain)                           |
 
 ---
 
 ## Exit Codes
 
-| Code | Meaning |
-|---|---|
-| `0` | Chain fully secure |
-| `1` | Bogus — cryptographic validation failed |
-| `2` | Insecure — delegation chain not anchored end-to-end |
+| Code | Meaning                                             |
+| ---- | --------------------------------------------------- |
+| `0`  | Chain fully secure                                  |
+| `1`  | Bogus — cryptographic validation failed             |
+| `2`  | Insecure — delegation chain not anchored end-to-end |
 
 ---
 
@@ -174,9 +175,51 @@ chainvalidator/
 │   ├── dnssec_utils.py   ds_matches_dnskey, validate_rrsig_over_rrset, NSEC3 helpers
 │   ├── models.py         Status, ChainLink, LeafResult, DNSSECReport
 │   └── reporter.py       print_full_report and section printers (Rich)
+├── tests/
+│   ├── conftest.py        Shared fixtures and factories
+|   ├── test_assessor.py
+|   ├── test_checker.py
+|   ├── test_cli.py
+|   ├── test_constants.py
+|   ├── test_dns_utils.py
+|   ├── test_dnssec_utils.py
+|   ├── test_models.py
+|   └── test_reporter.py
+├── requirements-dev.txt
+├── requirements.txt
 ├── LICENSE
 └── pyproject.toml
 ```
+
+---
+
+## Running Tests
+
+```bash
+source .venv/bin/activate
+
+# Run all tests
+pytest tests/
+
+# Run a single module
+pytest tests/test_checker.py
+
+# Run a single test class
+pytest tests/test_checker.py::TestValidateNsec3Nxdomain -v
+```
+
+The test suite has **226 tests** and achieves **100% coverage** of all
+testable code. The one `# pragma: no cover` annotation marks a defensive
+guard inside the `validate_nsec3_rrset` closure in `_validate_nsec3_nxdomain`
+— it is structurally unreachable because the closure is only ever called with
+hashes already confirmed to be in `nsec3_map`, either by the closest-encloser
+loop's own `if h in nsec3_map` check or by `find_covering()`, which only
+returns keys from `nsec3_map.keys()`.
+
+All DNS network I/O (`udp_query`, `get_dnskey`, `get_ds_from_parent`,
+`dns.resolver.resolve`) and the IANA trust anchor HTTP fetch (`requests.get`)
+are mocked at the boundary — no test touches a real nameserver or the
+internet.
 
 ---
 
