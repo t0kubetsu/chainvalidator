@@ -76,4 +76,4 @@ dev = ["pytest>=8", "pytest-cov>=5"]
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]
-addopts = "--cov=mailvalidator --cov-report=term-missing"
+addopts = "--cov=chainvalidator --cov-report=term-missing"
