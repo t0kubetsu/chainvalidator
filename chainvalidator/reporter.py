@@ -172,6 +172,17 @@ def print_leaf(report: DNSSECReport) -> None:
         for r in leaf.records:
             tbl.add_row(f"{leaf.qname} IN {leaf.record_type}", r)
         console.print(tbl)
+    elif leaf.nxdomain:
+        if leaf.status is Status.SECURE:
+            console.print(
+                f"  [green]✔[/green]  [bold]{leaf.qname}[/bold] does not exist "
+                f"(secure NXDOMAIN — denial of existence proof validated)"
+            )
+        else:
+            console.print(
+                f"  [yellow]⚠[/yellow]  [bold]{leaf.qname}[/bold] does not exist "
+                f"(NXDOMAIN — no signed denial proof available)"
+            )
     else:
         console.print(
             f"  [dim]No {leaf.record_type} records found (NODATA or NXDOMAIN).[/dim]"

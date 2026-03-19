@@ -195,11 +195,72 @@ class TestPrintLeaf:
         out = _capture(print_leaf, report)
         assert "target.example.com" in out
 
-    def test_leaf_no_records_nodata(self):
+    def test_leaf_no_records_no_nxdomain(self):
+        """Empty answer, nxdomain=False → generic NODATA/NXDOMAIN fallback."""
         report = DNSSECReport(domain="example.com")
-        report.leaf = LeafResult(qname="example.com", record_type="A", records=[])
+        report.leaf = LeafResult(
+            qname="example.com", record_type="A", records=[], nxdomain=False
+        )
         out = _capture(print_leaf, report)
         assert "No A records found" in out
+
+    def test_leaf_secure_nxdomain(self):
+        """nxdomain=True + Status.SECURE → secure denial-of-existence message."""
+        report = DNSSECReport(domain="www.example.com")
+        report.leaf = LeafResult(
+            qname="www.example.com",
+            record_type="A",
+            nxdomain=True,
+            status=Status.SECURE,
+            notes=[
+                "Secure NXDOMAIN: www.example.com does not exist (denial proof validated)"
+            ],
+        )
+        out = _capture(print_leaf, report)
+        # Must show the positive secure message, not the old warning text.
+        # Use short substrings that won't be broken by Rich's line-wrapping.
+        assert "does not exist" in out
+        assert "Secure NXDOMAIN" in out
+        # Must NOT show the insecure branch message
+        assert "no signed denial" not in out
+
+    def test_leaf_insecure_nxdomain(self):
+        """nxdomain=True + Status.INSECURE → unsigned denial message."""
+        report = DNSSECReport(domain="www.example.com")
+        report.leaf = LeafResult(
+            qname="www.example.com",
+            record_type="A",
+            nxdomain=True,
+            status=Status.INSECURE,
+            warnings=["NXDOMAIN: www.example.com does not exist in zone example.com."],
+        )
+        out = _capture(print_leaf, report)
+        assert "does not exist" in out
+        # The insecure branch shows the ⚠ nxdomain line; the leaf warning is also
+        # printed by the generic warnings loop — both must appear.
+        assert "NXDOMAIN" in out
+        # The secure "denial proof validated" message must NOT appear.
+        assert "denial proof validated" not in out
+
+    def test_leaf_secure_nxdomain_no_chain_degradation(self):
+        """A secure NXDOMAIN leaf must not generate a warning line in the output."""
+        report = DNSSECReport(domain="www.example.com", status=Status.SECURE)
+        report.leaf = LeafResult(
+            qname="www.example.com",
+            record_type="A",
+            nxdomain=True,
+            status=Status.SECURE,
+            notes=[
+                "Secure NXDOMAIN: www.example.com does not exist (denial proof validated)"
+            ],
+        )
+        out = _capture(print_leaf, report)
+        # The secure path shows the ✔ denial-proof message; no ⚠ insecure warning.
+        # Use short substrings that won't be broken by Rich's line-wrapping.
+        assert "Secure NXDOMAIN" in out
+        assert "does not exist" in out
+        # The insecure "no signed denial proof" phrase must be absent.
+        assert "no signed denial" not in out
 
     def test_leaf_with_notes_warnings_errors(self):
         report = DNSSECReport(domain="example.com")
@@ -225,6 +286,18 @@ class TestPrintLeaf:
         )
         out = _capture(print_leaf, report)
         assert "99" in out
+
+    def test_nxdomain_flag_false_shows_generic_nodata(self):
+        """nxdomain=False with no records still falls through to the generic message."""
+        report = DNSSECReport(domain="example.com")
+        report.leaf = LeafResult(
+            qname="example.com",
+            record_type="AAAA",
+            records=[],
+            nxdomain=False,
+        )
+        out = _capture(print_leaf, report)
+        assert "No AAAA records found" in out
 
 
 # ---------------------------------------------------------------------------
@@ -262,6 +335,22 @@ class TestPrintVerdict:
         out = _capture(print_verdict, report)
         assert "FAILED" in out
 
+    def test_secure_nxdomain_verdict_is_secure(self):
+        """A proven NXDOMAIN must produce a SECURE overall verdict."""
+        report = DNSSECReport(domain="www.example.com", status=Status.SECURE)
+        report.leaf = LeafResult(
+            qname="www.example.com",
+            record_type="A",
+            nxdomain=True,
+            status=Status.SECURE,
+            notes=[
+                "Secure NXDOMAIN: www.example.com does not exist (denial proof validated)"
+            ],
+        )
+        out = _capture(print_verdict, report)
+        assert "successfully" in out
+        assert "NOT fully anchored" not in out
+
 
 # ---------------------------------------------------------------------------
 # print_full_report
@@ -289,3 +378,27 @@ class TestPrintFullReport:
         )
         out = _capture(print_full_report, report)
         assert "chain broken" in out
+
+    def test_full_report_secure_nxdomain(self):
+        """Full report for a domain that resolves to a secure NXDOMAIN."""
+        report = DNSSECReport(
+            domain="www.example.com",
+            status=Status.SECURE,
+            trust_anchor_keys=["DS=20326/SHA-256"],
+        )
+        report.chain.append(ChainLink(zone="."))
+        report.chain.append(ChainLink(zone="net."))
+        report.chain.append(ChainLink(zone="example.com."))
+        report.leaf = LeafResult(
+            qname="www.example.com",
+            record_type="A",
+            nxdomain=True,
+            status=Status.SECURE,
+            notes=[
+                "Secure NXDOMAIN: www.example.com does not exist (denial proof validated)"
+            ],
+        )
+        out = _capture(print_full_report, report)
+        assert "www.example.com" in out
+        assert "successfully" in out
+        assert "NOT fully anchored" not in out

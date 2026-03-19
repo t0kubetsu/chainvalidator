@@ -1234,6 +1234,8 @@ class DNSSECChecker:
                     if sig.type_covered == dns.rdatatype.SOA and soa_rrsig is None:
                         soa_rrsig = rr
 
+        proof_valid = True
+
         if soa_rrset and soa_rrsig:
             ok, key_tag_used = validate_rrsig_over_rrset(
                 soa_rrset, soa_rrsig, zone_dnskeys, zone
@@ -1251,6 +1253,8 @@ class DNSSECChecker:
                 leaf.status = Status.BOGUS
                 leaf.errors.append(msg)
                 return False
+        elif soa_rrset and not soa_rrsig:
+            proof_valid = False
 
         nsec3_rrs = [
             rr for rr in raw_resp.authority if rr.rdtype == dns.rdatatype.NSEC3
@@ -1266,9 +1270,18 @@ class DNSSECChecker:
                 return False
 
         msg = f"NXDOMAIN: {qname} does not exist in zone {zone}"
-        self._warn(msg)
-        leaf.warnings.append(msg)
-        leaf.status = Status.INSECURE
+        leaf.nxdomain = True
+
+        if proof_valid:
+            note = f"Secure NXDOMAIN: {qname} does not exist (denial proof validated)"
+            leaf.notes.append(note)
+            leaf.status = Status.SECURE
+            logger.info("  %s %s", GREEN, note)
+        else:
+            self._warn(msg)
+            leaf.warnings.append(msg)
+            leaf.status = Status.INSECURE
+
         return False
 
     def _validate_nsec3_nxdomain(

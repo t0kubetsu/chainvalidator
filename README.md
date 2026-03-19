@@ -16,7 +16,7 @@ $ chainvalidator check example.com
 ```
 
 ![Python](https://img.shields.io/badge/python-%3E%3D3.11-blue)
-![Tests](https://img.shields.io/badge/tests-226%20passing-brightgreen)
+![Tests](https://img.shields.io/badge/tests-243%20passing-brightgreen)
 ![Coverage](https://img.shields.io/badge/coverage-100%25-brightgreen)
 ![License](https://img.shields.io/badge/license-GPLv3-lightgrey)
 
@@ -208,7 +208,7 @@ pytest tests/test_checker.py
 pytest tests/test_checker.py::TestValidateNsec3Nxdomain -v
 ```
 
-The test suite has **226 tests** and achieves **100% coverage** of all
+The test suite has **243 tests** and achieves **100% coverage** of all
 testable code. The one `# pragma: no cover` annotation marks a defensive
 guard inside the `validate_nsec3_rrset` closure in `_validate_nsec3_nxdomain`
 — it is structurally unreachable because the closure is only ever called with

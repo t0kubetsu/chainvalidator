@@ -117,6 +117,7 @@ class LeafResult:
     rrsig_used: Optional[int] = None
     rrsig_expires: str = ""
     cname_chain: list[str] = field(default_factory=list)
+    nxdomain: bool = False
     status: Status = Status.SECURE
     errors: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)

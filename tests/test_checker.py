@@ -990,7 +990,16 @@ class TestCheckFinalRrset:
                 result = c._check_final_rrset("example.com.", dnskeys)
         assert result is False
 
-    def test_nxdomain_response(self):
+    def test_nxdomain_with_signed_soa_is_secure(self):
+        """
+        A proven NXDOMAIN (signed SOA present, no NSEC3) must:
+          - return False (no records were found)
+          - NOT add any entry to c.warnings
+          - NOT add any entry to c.errors
+          - set leaf.nxdomain = True
+          - set leaf.status = Status.SECURE
+          - add a note containing "Secure NXDOMAIN"
+        """
         c = self._checker_with_ns_map()
         dnskeys = make_dnskey_rrset("example.com.")
         resp = make_response("example.com.", dns.rdatatype.A, rcode=dns.rcode.NXDOMAIN)
@@ -1003,8 +1012,37 @@ class TestCheckFinalRrset:
                 return_value=(True, 42),
             ):
                 result = c._check_final_rrset("example.com.", dnskeys)
+        # Still False — there are no records to return
         assert result is False
+        # But the chain is not degraded
+        assert c.warnings == [], f"Unexpected warnings: {c.warnings}"
+        assert c.errors == [], f"Unexpected errors: {c.errors}"
+        assert c.report.leaf is not None
+        assert c.report.leaf.nxdomain is True
+        assert c.report.leaf.status == Status.SECURE
+        assert any("Secure NXDOMAIN" in n for n in c.report.leaf.notes)
+
+    def test_nxdomain_without_soa_rrsig_is_insecure(self):
+        """
+        An NXDOMAIN with a SOA but no RRSIG over it (proof_valid=False) must:
+          - return False
+          - add a warning (not an error)
+          - set leaf.nxdomain = True
+          - set leaf.status = Status.INSECURE
+        """
+        c = self._checker_with_ns_map()
+        dnskeys = make_dnskey_rrset("example.com.")
+        resp = make_response("example.com.", dns.rdatatype.A, rcode=dns.rcode.NXDOMAIN)
+        # SOA present but NO RRSIG → proof_valid=False path
+        resp.authority.append(make_soa_rrset("example.com."))
+        with patch("chainvalidator.checker.udp_query", return_value=resp):
+            result = c._check_final_rrset("example.com.", dnskeys)
+        assert result is False
+        assert c.errors == [], f"Unexpected errors: {c.errors}"
         assert any("NXDOMAIN" in w for w in c.warnings)
+        assert c.report.leaf is not None
+        assert c.report.leaf.nxdomain is True
+        assert c.report.leaf.status == Status.INSECURE
 
     def test_no_record_and_no_nsec_no_nxdomain(self):
         """Empty answer, no NSEC, NOERROR → bogus."""
@@ -1169,6 +1207,26 @@ class TestFinalise:
         c._finalise()
         assert c.report.status == Status.SECURE
 
+    def test_proven_nxdomain_does_not_add_warnings(self):
+        """After a proven NXDOMAIN, c.warnings must be empty so _finalise yields SECURE."""
+        c = _make_checker()
+        # Simulate what _validate_nxdomain now does for a proven NXDOMAIN:
+        # it adds a note to the leaf, not a warning to the checker.
+        from chainvalidator.models import LeafResult
+
+        c.report.leaf = LeafResult(
+            qname="www.example.com",
+            record_type="A",
+            nxdomain=True,
+            status=Status.SECURE,
+            notes=[
+                "Secure NXDOMAIN: www.example.com does not exist (denial proof validated)"
+            ],
+        )
+        c._finalise()
+        assert c.report.status == Status.SECURE
+        assert c.warnings == []
+
 
 # ---------------------------------------------------------------------------
 # check() — top-level integration
@@ -1274,6 +1332,54 @@ class TestCheckerCheck:
             result = c.check()
         assert result is False
 
+    def test_proven_nxdomain_returns_true(self):
+        """
+        check() must return True when the only 'negative' result is a
+        cryptographically proven NXDOMAIN — no errors, no warnings.
+        """
+        c = _make_checker("www.example.com")
+        dnskey_rr = make_dnskey_rrset(".")
+
+        def mock_build(fqdn):
+            c._zone_ns_map = {".": [("a.root", "1.1.1.1")]}
+            return ["."]
+
+        def mock_load_ta():
+            return [MagicMock()]
+
+        def mock_check_root(ta, validated):
+            validated["."] = dnskey_rr
+            c.report.chain.append(MagicMock())
+            return True
+
+        def mock_check_final(zone, keys, **kwargs):
+            # Simulate what the real method does for a proven NXDOMAIN:
+            # sets leaf with nxdomain=True, status=SECURE, note added — no warnings.
+            from chainvalidator.models import LeafResult
+
+            c.report.leaf = LeafResult(
+                qname="www.example.com",
+                record_type="A",
+                nxdomain=True,
+                status=Status.SECURE,
+                notes=[
+                    "Secure NXDOMAIN: www.example.com does not exist (denial proof validated)"
+                ],
+            )
+            return False  # method returns False (no records found)
+
+        with patch.object(c, "_build_zone_list", side_effect=mock_build):
+            with patch.object(c, "_load_trust_anchor", side_effect=mock_load_ta):
+                with patch.object(c, "_check_root", side_effect=mock_check_root):
+                    with patch.object(
+                        c, "_check_final_rrset", side_effect=mock_check_final
+                    ):
+                        result = c.check()
+
+        # No errors, no warnings → True
+        assert result is True
+        assert c.report.status == Status.SECURE
+
 
 # ---------------------------------------------------------------------------
 # NXDOMAIN with signed SOA validation failure
@@ -1305,6 +1411,72 @@ class TestNxdomainSoaValidation:
                     resp, "example.com.", dnskeys, "example.com.", leaf
                 )
         assert result is False
+        # SOA RRSIG failed → hard error (BOGUS), not just a warning
+        assert leaf.status == Status.BOGUS
+        assert len(c.errors) >= 1
+
+    def test_proven_nxdomain_no_warning_recorded(self):
+        """
+        When SOA + RRSIG both validate (proof_valid=True), _validate_nxdomain
+        must NOT call self._warn() and must NOT call self._fail().
+        The leaf should be SECURE with nxdomain=True and a note.
+        """
+        c = _make_checker("example.com")
+        c._zone_ns_map = {"example.com.": [("ns1.example.com.", "1.2.3.4")]}
+        dnskeys = make_dnskey_rrset("example.com.")
+
+        soa_rr = make_soa_rrset("example.com.")
+        rrsig_soa = make_rrsig_rrset("example.com.", type_covered=dns.rdatatype.SOA)
+        resp = make_response("example.com.", dns.rdatatype.A, rcode=dns.rcode.NXDOMAIN)
+        resp.authority.append(soa_rr)
+        resp.authority.append(rrsig_soa)
+
+        from chainvalidator.models import LeafResult
+
+        leaf = LeafResult(qname="example.com", record_type="A")
+
+        with patch(
+            "chainvalidator.checker.validate_rrsig_over_rrset",
+            return_value=(True, 42),
+        ):
+            result = c._validate_nxdomain(
+                resp, "example.com.", dnskeys, "example.com.", leaf
+            )
+
+        assert result is False  # always False — no records found
+        assert c.warnings == []  # no warning added to checker
+        assert c.errors == []  # no error added to checker
+        assert leaf.nxdomain is True
+        assert leaf.status == Status.SECURE
+        assert any("Secure NXDOMAIN" in n for n in leaf.notes)
+
+    def test_nxdomain_no_soa_proof_records_warning(self):
+        """
+        NXDOMAIN with a SOA but no RRSIG → proof_valid=False →
+        must call self._warn(), set leaf.status=INSECURE.
+        """
+        c = _make_checker("example.com")
+        c._zone_ns_map = {"example.com.": [("ns1.example.com.", "1.2.3.4")]}
+        dnskeys = make_dnskey_rrset("example.com.")
+
+        soa_rr = make_soa_rrset("example.com.")
+        resp = make_response("example.com.", dns.rdatatype.A, rcode=dns.rcode.NXDOMAIN)
+        resp.authority.append(soa_rr)
+        # No RRSIG over SOA → proof_valid=False
+
+        from chainvalidator.models import LeafResult
+
+        leaf = LeafResult(qname="example.com", record_type="A")
+
+        result = c._validate_nxdomain(
+            resp, "example.com.", dnskeys, "example.com.", leaf
+        )
+
+        assert result is False
+        assert len(c.warnings) >= 1  # warning was recorded
+        assert c.errors == []
+        assert leaf.nxdomain is True
+        assert leaf.status == Status.INSECURE
 
 
 # ---------------------------------------------------------------------------

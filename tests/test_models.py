@@ -70,10 +70,25 @@ class TestLeafResult:
         assert leaf.rrsig_used is None
         assert leaf.rrsig_expires == ""
         assert leaf.cname_chain == []
+        assert leaf.nxdomain is False
         assert leaf.status == Status.SECURE
         assert leaf.errors == []
         assert leaf.warnings == []
         assert leaf.notes == []
+
+    def test_nxdomain_default_is_false(self):
+        leaf = LeafResult(qname="example.com", record_type="A")
+        assert leaf.nxdomain is False
+
+    def test_nxdomain_can_be_set_true(self):
+        leaf = LeafResult(qname="example.com", record_type="A", nxdomain=True)
+        assert leaf.nxdomain is True
+
+    def test_nxdomain_mutable_defaults_are_independent(self):
+        a = LeafResult(qname="a.example.com", record_type="A")
+        b = LeafResult(qname="b.example.com", record_type="A")
+        a.nxdomain = True
+        assert b.nxdomain is False
 
     def test_set_fields(self):
         leaf = LeafResult(
@@ -86,6 +101,37 @@ class TestLeafResult:
         assert leaf.records == ["1.2.3.4"]
         assert leaf.rrsig_used == 42
         assert leaf.rrsig_expires == "2099-01-01"
+
+    def test_secure_nxdomain_leaf(self):
+        """A proven NXDOMAIN should be SECURE with nxdomain=True and a note."""
+        leaf = LeafResult(
+            qname="www.example.com",
+            record_type="A",
+            nxdomain=True,
+            status=Status.SECURE,
+            notes=[
+                "Secure NXDOMAIN: www.example.com does not exist (denial proof validated)"
+            ],
+        )
+        assert leaf.nxdomain is True
+        assert leaf.status == Status.SECURE
+        assert any("Secure NXDOMAIN" in n for n in leaf.notes)
+        assert leaf.warnings == []
+        assert leaf.errors == []
+
+    def test_insecure_nxdomain_leaf(self):
+        """An unproven NXDOMAIN should be INSECURE with nxdomain=True and a warning."""
+        leaf = LeafResult(
+            qname="www.example.com",
+            record_type="A",
+            nxdomain=True,
+            status=Status.INSECURE,
+            warnings=["NXDOMAIN: www.example.com does not exist in zone example.com."],
+        )
+        assert leaf.nxdomain is True
+        assert leaf.status == Status.INSECURE
+        assert any("NXDOMAIN" in w for w in leaf.warnings)
+        assert leaf.errors == []
 
 
 class TestDNSSECReport:
@@ -133,3 +179,20 @@ class TestDNSSECReport:
         r.chain.append(ChainLink(zone="."))
         # root "." is filtered out of the appended list
         assert r.zone_path == ["."]
+
+    def test_secure_nxdomain_does_not_degrade_report(self):
+        """A proven NXDOMAIN leaf must not cause the report status to degrade."""
+        r = DNSSECReport(domain="www.example.com", status=Status.SECURE)
+        r.leaf = LeafResult(
+            qname="www.example.com",
+            record_type="A",
+            nxdomain=True,
+            status=Status.SECURE,
+            notes=[
+                "Secure NXDOMAIN: www.example.com does not exist (denial proof validated)"
+            ],
+        )
+        # No errors or warnings on the report itself
+        assert r.errors == []
+        assert r.warnings == []
+        assert r.is_secure is True
