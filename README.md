@@ -1,197 +1,183 @@
-# ChainValidator
+# chainvalidator
 
-**ChainValidator** is a Python tool that validates the **DNSSEC chain of trust** for a domain.
+> Validate the full DNSSEC chain of trust for any domain — from the command
+> line or as a Python library.
 
-It verifies the DNSSEC delegation hierarchy step-by-step, starting from the **root trust anchor** and validating **DS ↔ DNSKEY relationships and RRSIG signatures** until the target domain.
+**chainvalidator** walks the delegation path from the IANA root trust anchor
+down through every TLD and delegated zone to the target, verifying each
+DS → DNSKEY → RRSIG link and the signed leaf record.
 
-The tool can be used either as a **Python CLI utility** or as a **Python module**.
-
----
-
-# Features
-
-* Validate the **complete DNSSEC chain of trust**
-* Walk the hierarchy from **root → delegated zone → target domain**
-* Verify:
-
-  * DNSKEY records
-  * DS records
-  * RRSIG signatures
-  * Parent/child cryptographic linkage
-* Detect **broken DNSSEC delegations**
-* Detailed **step-by-step validation output**
-* Can be used as:
-
-  * **CLI tool**
-  * **Python module**
-
----
-
-# Why ChainValidator
-
-Tools such as `dig`, `drill`, or `delv` typically rely on a **validating resolver** to perform DNSSEC verification.
-
-ChainValidator instead performs **explicit step-by-step validation**, exposing the internal validation process:
-
-* trust anchor verification
-* DS → DNSKEY validation
-* DNSKEY → RRSIG verification
-* record signature validation
-
-This tool was created to provide a **Python CLI and library equivalent of the [Verisign DNSSEC Debugger](https://dnssec-debugger.verisignlabs.com/)**, enabling DNSSEC validation directly from scripts or automation pipelines.
-
-It is useful for:
-
-* learning how DNSSEC validation works
-* debugging broken DNSSEC delegations
-* auditing DNSSEC deployments
-* building security tooling around DNSSEC
-
----
-
-# DNSSEC Chain of Trust
-
-DNSSEC establishes trust using a **hierarchical chain of cryptographic signatures**.
+This tool was created to provide a **Python CLI and library equivalent of the
+[Verisign DNSSEC Debugger](https://dnssec-debugger.verisignlabs.com/)**, enabling
+DNSSEC validation directly from scripts or automation pipelines.
 
 ```
-Trust Anchor (IANA)
-        │
-        ▼
-Root Zone (.)
-        │
-        ▼
-Top-Level Domain (TLD)
-        │
-        ▼
-Delegated Zone
-        │
-        ▼
-Target Domain
+$ chainvalidator check example.com
 ```
 
-Each parent zone publishes a **DS record** that references the child zone’s **DNSKEY**.
-
-If all DS ↔ DNSKEY relationships and signatures verify successfully, the domain is considered **securely signed**.
+![Python](https://img.shields.io/badge/python-%3E%3D3.11-blue)
+![License](https://img.shields.io/badge/license-GPLv3-lightgrey)
 
 ---
 
-# Quick Start
+## Contents
+
+- [Features](#features)
+- [Requirements](#requirements)
+- [Installation](#installation)
+- [CLI Usage](#cli-usage)
+- [Python API](#python-api)
+- [Logging](#logging)
+- [Exit Codes](#exit-codes)
+- [Project Structure](#project-structure)
+
+---
+
+## Features
+
+- **Full chain validation** — Trust Anchor → `.` → TLD → Delegated Zone → target.
+- **Automatic zone-cut detection** — walks the DNS hierarchy iteratively; no
+  hard-coded assumptions about delegation depth.
+- **DS → DNSKEY → RRSIG** — each delegation step is cryptographically verified.
+- **NSEC NODATA proofs** — RFC 4035 §5.4 denial-of-existence validation.
+- **NSEC3 closest-encloser proofs** — RFC 5155 §8.3 NXDOMAIN validation.
+- **CNAME following** — validates each target zone independently (max 8 hops).
+- **RRSIG expiry checking** on leaf records.
+- **Rich terminal output** — colour-coded chain table and verdict panel.
+- **Structured result models** — `DNSSECReport`, `ChainLink`, `LeafResult`,
+  `Status` for programmatic use.
+- **Library-friendly logging** — all diagnostic output via the
+  `"chainvalidator"` logger; the CLI never touches it.
+
+---
+
+## Requirements
+
+- Python ≥ 3.11
+- [`dnspython[dnssec]`](https://www.dnspython.org/) ≥ 2.6
+- [`requests`](https://docs.python-requests.org/) ≥ 2.31
+- [`rich`](https://github.com/Textualize/rich) ≥ 13.7
+- [`typer`](https://typer.tiangolo.com/) ≥ 0.12
+
+---
+
+## Installation
 
 ```bash
 git clone https://github.com/t0kubetsu/chainvalidator.git
 cd chainvalidator
-
-python -m venv venv
-source venv/bin/activate
-
-pip install -r requirements.txt
-
-python chainvalidator.py example.com
+python -m venv .venv
+source .venv/bin/activate
+pip install -e .
 ```
 
 ---
 
-# Example Output
+## CLI Usage
 
-Successful validation:
+```bash
+# Validate a domain (A record by default)
+chainvalidator check example.com
 
-```
-======================================================================
-  DNSSEC Validation for: example.com
-======================================================================
-----------------------------------------------------------------------
-  Trust Anchor (IANA root-anchors.xml)
-----------------------------------------------------------------------
-  ✅ Trust anchor DS=20326/SHA-256 (algorithm RSASHA256) -- active
-  ✅ Trust anchor DS=38696/SHA-256 (algorithm RSASHA256) -- active
-----------------------------------------------------------------------
-  Zone: . (root)
-----------------------------------------------------------------------
-  ✅ Found 3 DNSKEY record(s) for .
-  ✅ DS=20326/SHA-256 verifies DNSKEY=20326/SEP
-  ✅ DS=38696/SHA-256 verifies DNSKEY=38696/SEP
-  ✅ RRSIG=20326 and DNSKEY=20326/SEP verifies the DNSKEY RRset
-----------------------------------------------------------------------
-  Zone: com.  (parent: .)
-----------------------------------------------------------------------
-  [DS check: . -> com.]
-  ✅ Found 1 DS record(s) for com.
-      DS=19718/SHA-256  algorithm=ECDSAP256SHA256
-  ✅ RRSIG=21831 and DNSKEY=21831 verifies the DS RRset
-  [DNSKEY check: com.]
-  ✅ Found 2 DNSKEY record(s) for com.
-  ✅ DS=19718/SHA-256 verifies DNSKEY=19718/SEP
-  ✅ RRSIG=19718 and DNSKEY=19718/SEP verifies the DNSKEY RRset
-----------------------------------------------------------------------
-  Zone: example.com.  (parent: com.)
-----------------------------------------------------------------------
-  [DS check: com. -> example.com.]
-  ✅ Found 1 DS record(s) for example.com.
-      DS=2371/SHA-256  algorithm=ECDSAP256SHA256
-  ✅ RRSIG=35511 and DNSKEY=35511 verifies the DS RRset
-  [DNSKEY check: example.com.]
-  ✅ Found 4 DNSKEY record(s) for example.com.
-  ✅ DS=2371/SHA-256 verifies DNSKEY=2371/SEP
-  ✅ RRSIG=2371 and DNSKEY=2371/SEP verifies the DNSKEY RRset
-----------------------------------------------------------------------
-  Record validation: example.com. A
-----------------------------------------------------------------------
-  ✅ Found 2 A record(s):
-      example.com. 300 IN A 104.18.27.120
-      example.com. 300 IN A 104.18.26.120
-  ✅ RRSIG=34505 and DNSKEY=34505 verifies the A RRset
-======================================================================
-✅  Full chain-of-trust validated successfully!
-======================================================================
+# Validate a specific record type
+chainvalidator check example.com --type AAAA
+chainvalidator check example.com --type MX
+
+# Adjust the per-query timeout (seconds)
+chainvalidator check example.com --timeout 10
+
+# Reference tables
+chainvalidator info algorithms
+chainvalidator info digests
+chainvalidator info root-servers
+
+# Version
+chainvalidator --version
 ```
 
-Example of **unsigned domain**:
+---
+
+## Python API
+
+```python
+from chainvalidator.assessor import assess
+from chainvalidator.models   import Status
+
+report = assess("example.com", record_type="A", timeout=5.0)
+
+print(report.status)           # Status.SECURE | INSECURE | BOGUS
+print(report.is_secure)        # True / False
+print(report.zone_path)        # ['.', 'com.', 'example.com.']
+print(report.trust_anchor_keys)# ['DS=20326/SHA-256']
+
+for link in report.chain:
+    print(link.zone, link.status, link.ds_matched)
+
+if report.leaf:
+    print(report.leaf.records)       # ['93.184.216.34']
+    print(report.leaf.rrsig_expires) # '2025-06-01'
+
+# Rich terminal output
+from chainvalidator.reporter import print_full_report
+print_full_report(report)
+```
+
+---
+
+## Logging
+
+The CLI produces no logging output — all display goes through Rich.
+As a library, you can capture detailed diagnostic output via the
+`"chainvalidator"` logger:
+
+```python
+import logging
+
+handler = logging.StreamHandler()
+handler.setFormatter(logging.Formatter("%(message)s"))
+logging.getLogger("chainvalidator").addHandler(handler)
+logging.getLogger("chainvalidator").setLevel(logging.DEBUG)
+```
+
+| Level | Content |
+|---|---|
+| `DEBUG` | Per-query detail: NS selection, keytag listings, RRSIG expiry |
+| `INFO` | Chain milestones: zone headers, DS/DNSKEY matches, final verdict |
+| `WARNING` | Insecure delegations, unsigned zones, NXDOMAIN |
+| `ERROR` | Hard validation failures (bogus chain) |
+
+---
+
+## Exit Codes
+
+| Code | Meaning |
+|---|---|
+| `0` | Chain fully secure |
+| `1` | Bogus — cryptographic validation failed |
+| `2` | Insecure — delegation chain not anchored end-to-end |
+
+---
+
+## Project Structure
 
 ```
-======================================================================
-  DNSSEC Validation for: google.com
-======================================================================
-----------------------------------------------------------------------
-  Trust Anchor (IANA root-anchors.xml)
-----------------------------------------------------------------------
-  ✅ Trust anchor DS=20326/SHA-256 (algorithm RSASHA256) -- active
-  ✅ Trust anchor DS=38696/SHA-256 (algorithm RSASHA256) -- active
-----------------------------------------------------------------------
-  Zone: . (root)
-----------------------------------------------------------------------
-  ✅ Found 3 DNSKEY record(s) for .
-  ✅ DS=20326/SHA-256 verifies DNSKEY=20326/SEP
-  ✅ DS=38696/SHA-256 verifies DNSKEY=38696/SEP
-  ✅ RRSIG=20326 and DNSKEY=20326/SEP verifies the DNSKEY RRset
-----------------------------------------------------------------------
-  Zone: com.  (parent: .)
-----------------------------------------------------------------------
-  [DS check: . -> com.]
-  ✅ Found 1 DS record(s) for com.
-      DS=19718/SHA-256  algorithm=ECDSAP256SHA256
-  ✅ RRSIG=21831 and DNSKEY=21831 verifies the DS RRset
-  [DNSKEY check: com.]
-  ✅ Found 2 DNSKEY record(s) for com.
-  ✅ DS=19718/SHA-256 verifies DNSKEY=19718/SEP
-  ✅ RRSIG=19718 and DNSKEY=19718/SEP verifies the DNSKEY RRset
-----------------------------------------------------------------------
-  Zone: google.com.  (parent: com.)
-----------------------------------------------------------------------
-  [DS check: com. -> google.com.]
-  ⚠️  WARNING: No DS records for google.com. in parent zone -- delegation is INSECURE (island of security).
-  [DNSKEY check (insecure): google.com.]
-  ⚠️  WARNING: No DNSKEY records found for google.com. -- zone is unsigned
-----------------------------------------------------------------------
-  Record validation: google.com. A
-----------------------------------------------------------------------
-  ✅ Found 1 A record(s):
-      google.com. 300 IN A 216.58.206.78
-  ❌ ERROR: No RRSIG found over google.com. A RRset
-======================================================================
-❌  Validation FAILED -- 1 error(s)
-     * No RRSIG found over google.com. A RRset
-⚠️   2 warning(s):
-     * No DS records for google.com. in parent zone -- delegation is INSECURE (island of security).
-     * No DNSKEY records found for google.com. -- zone is unsigned
-======================================================================
+chainvalidator/
+├── chainvalidator/
+│   ├── __init__.py       Package version, NullHandler
+│   ├── assessor.py       assess() — public API entry point
+│   ├── checker.py        DNSSECChecker — core validation logic
+│   ├── cli.py            Typer CLI: check, info sub-commands
+│   ├── constants.py      ALGORITHM_MAP, DIGEST_MAP, ROOT_SERVERS, DNS_TIMEOUT
+│   ├── dns_utils.py      udp_query, extract_rrsets, get_ds_from_parent, get_dnskey
+│   ├── dnssec_utils.py   ds_matches_dnskey, validate_rrsig_over_rrset, NSEC3 helpers
+│   ├── models.py         Status, ChainLink, LeafResult, DNSSECReport
+│   └── reporter.py       print_full_report and section printers (Rich)
+├── LICENSE
+└── pyproject.toml
 ```
+
+---
+
+## License
+
+GPLv3 — see [LICENSE](LICENSE) for details.

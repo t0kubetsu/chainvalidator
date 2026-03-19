@@ -1,2 +1,4 @@
 dnspython[dnssec]
 requests
+rich
+typer
