@@ -1324,7 +1324,7 @@ class DNSSECChecker:
             :returns: ``True`` on success.
             :rtype: bool
             """
-            if owner_hash not in nsec3_map:  # pragma: no cover
+            if owner_hash not in nsec3_map:
                 return False  # pragma: no cover
             rrset = nsec3_map[owner_hash][0]
             rrsig = nsec3_rrsigs.get(owner_hash)
