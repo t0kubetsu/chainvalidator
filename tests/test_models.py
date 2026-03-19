@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 from chainvalidator.models import ChainLink, DNSSECReport, LeafResult, Status
 
 

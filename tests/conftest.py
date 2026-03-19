@@ -159,12 +159,8 @@ def make_nsec_rrset(
         dns.name.from_text(name), dns.rdataclass.IN, dns.rdatatype.NSEC
     )
     rr.update_ttl(300)
-    # Bitmap window 0: only SOA (type 6) present → A (type 1) absent
-    # Byte 0 covers types 0-7: bit 1 = type 1 (A), bit 6 = type 6 (SOA)
-    bitmap = b"\x42"  # 0100 0010 → SOA(6) and NS(1)... actually 0x02 for NS only
-    # Build: type 6 bit = bit index 6 → byte 0 bit 1 = 0x02; let's place SOA only
-    # SOA = 6 → byte 0, bit (6) → 0b00000010 = 0x02
-    bitmap = bytes([0x02])
+    # Bitmap window 0: SOA (type 6) present, A (type 1) absent.
+    # SOA = type 6 → window 0, byte 0, bit 1 = 0x02
     rr.add(
         dns.rdata.from_text(
             dns.rdataclass.IN,

@@ -2,20 +2,20 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import patch
 
 import dns.flags
 import dns.message
 import dns.rdatatype
 import pytest
 
-from chainvalidator.constants import DNS_PORT, DNS_TIMEOUT
 from chainvalidator.dns_utils import (
     extract_rrsets,
     get_dnskey,
     get_ds_from_parent,
     udp_query,
 )
+
 from tests.conftest import (
     make_a_rrset,
     make_dnskey_rrset,
@@ -24,6 +24,7 @@ from tests.conftest import (
     make_response_with_answer,
     make_rrsig_rrset,
 )
+
 
 # ---------------------------------------------------------------------------
 # udp_query

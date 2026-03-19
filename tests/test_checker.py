@@ -8,10 +8,7 @@ and dns.resolver.resolve.
 from __future__ import annotations
 
 import base64
-import struct
-from calendar import timegm
-from datetime import datetime, timedelta, timezone
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, patch
 
 import dns.dnssec
 import dns.flags
@@ -36,7 +33,6 @@ from tests.conftest import (
     make_nsec_rrset,
     make_response,
     make_response_with_answer,
-    make_response_with_authority,
     make_rrsig_rrset,
     make_soa_rrset,
 )
@@ -277,7 +273,7 @@ class TestBuildZoneList:
                     "chainvalidator.checker.dns.resolver.resolve",
                     side_effect=Exception("no resolve"),
                 ):
-                    zones = c._build_zone_list("example.com.")
+                    _ = c._build_zone_list("example.com.")
         # ns1.example.com resolved with no IP → zone list entry may or may not
         # be present (no NS IP → empty result list → zone skipped)
 
@@ -1183,7 +1179,6 @@ class TestCheckerCheck:
     def _minimal_secure_setup(self, c: DNSSECChecker):
         """Patch everything so check() succeeds end-to-end."""
         dnskey_rr = make_dnskey_rrset(".")
-        rrsig_rr = make_rrsig_rrset(".", type_covered=dns.rdatatype.DNSKEY)
 
         def mock_build_zones(fqdn):
             c._zone_ns_map = {".": [("a.root", "1.1.1.1")]}
@@ -1417,8 +1412,6 @@ class TestFollowCnameComplete:
         cname_rrsig = make_rrsig_rrset(
             "www.example.com.", type_covered=dns.rdatatype.CNAME
         )
-        a_rr = make_a_rrset("example.com.")
-        a_rrsig = make_rrsig_rrset("example.com.", expiration_offset=86400)
 
         from chainvalidator.models import LeafResult
 
@@ -1436,9 +1429,7 @@ class TestFollowCnameComplete:
             return True
 
         with patch.object(c, "_build_zone_list", side_effect=mock_build_zones):
-            with patch.object(
-                c, "_check_zone", side_effect=check_zone_calls.append
-            ) as mock_zone:
+            with patch.object(c, "_check_zone", side_effect=check_zone_calls.append):
                 with patch(
                     "chainvalidator.checker.validate_rrsig_over_rrset",
                     return_value=(True, 42),
@@ -1695,16 +1686,6 @@ class TestValidateNsec3Nxdomain:
         """Build an NSEC3 RRset with the given owner hash and next pointer."""
         import struct
 
-        # Convert b32hex back to standard b32 for the owner name label
-        _FROM_B32HEX = str.maketrans(
-            "0123456789ABCDEFGHIJKLMNOPQRSTUV", "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"
-        )
-        b32std = owner_hash_b32hex.translate(_FROM_B32HEX)
-        # Pad to multiple of 8
-        pad = (8 - len(b32std) % 8) % 8
-        b32std_padded = b32std + "=" * pad
-        owner_raw = base64.b32decode(b32std_padded)
-
         owner_name = dns.name.from_text(f"{owner_hash_b32hex}.{zone}")
         rr = dns.rrset.RRset(owner_name, dns.rdataclass.IN, dns.rdatatype.NSEC3)
         rr.update_ttl(300)
@@ -1728,7 +1709,6 @@ class TestValidateNsec3Nxdomain:
 
     def _compute_hashes(self):
         """Return pre-computed hashes for our test names."""
-        import base64
         import hashlib
 
         _B32_STD = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"
@@ -2071,7 +2051,6 @@ class TestValidateNsec3Nxdomain:
         # nsec3_covers True for first call (CE validate check),
         # True for NC find_covering, False for WC find_covering.
         cover_calls = [0]
-        ce_call_done = [False]
 
         def covers_side(owner, nxt, tgt):
             # find_covering is called for nc and wc.

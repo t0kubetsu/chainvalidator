@@ -2,15 +2,13 @@
 
 from __future__ import annotations
 
-import base64
 import hashlib
+import base64
 from unittest.mock import MagicMock, patch
 
 import dns.dnssec
 import dns.name
 import dns.rdatatype
-import pytest
-
 from chainvalidator.dnssec_utils import (
     _TO_B32HEX,
     ds_matches_dnskey,
@@ -22,13 +20,15 @@ from chainvalidator.dnssec_utils import (
     nsec3_owner_hash,
     validate_rrsig_over_rrset,
 )
+
 from tests.conftest import (
-    make_a_rrset,
     make_dnskey_rdata,
     make_dnskey_rrset,
     make_ds_rrset,
+    make_a_rrset,
     make_rrsig_rrset,
 )
+
 
 # ---------------------------------------------------------------------------
 # ds_matches_dnskey
@@ -56,8 +56,6 @@ class TestDsMatchesDnskey:
 
     def test_matching_ds_and_dnskey(self):
         """Compute DS from real DNSKEY; they must match."""
-        import dns.rdata as _rdata
-
         dnskey = make_dnskey_rdata(flags=257, algorithm=13)
         computed_ds = dns.dnssec.make_ds("example.com.", dnskey, 2)
         result = ds_matches_dnskey(computed_ds, dnskey, "example.com.")

@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from io import StringIO
 
-import pytest
 from rich.console import Console
+from rich.table import Table
 
 from chainvalidator.models import (
     ChainLink,
@@ -24,6 +24,7 @@ from chainvalidator.reporter import (
     print_verdict,
 )
 
+
 # ---------------------------------------------------------------------------
 # Helper: capture Rich output into a string
 # ---------------------------------------------------------------------------
@@ -38,8 +39,6 @@ def _capture(fn, *args, **kwargs) -> str:
     try:
         fn(*args, **kwargs)
     finally:
-        import rich.console as _rc
-
         _rep.console = Console()
     return buf.getvalue()
 
@@ -102,15 +101,11 @@ class TestStatusPanelStyle:
 
 class TestChainTable:
     def test_returns_table(self):
-        from rich.table import Table
-
         chain = [ChainLink(zone="example.com.", status=Status.SECURE)]
         tbl = _chain_table(chain)
         assert isinstance(tbl, Table)
 
     def test_row_with_no_ds_shows_dash(self):
-        from rich.table import Table
-
         chain = [ChainLink(zone=".", ds_records=[], dnskeys=[])]
         tbl = _chain_table(chain)
         assert tbl.row_count == 1
