@@ -16,6 +16,8 @@ $ chainvalidator check example.com
 ```
 
 ![Python](https://img.shields.io/badge/python-%3E%3D3.11-blue)
+![Tests](https://img.shields.io/badge/tests-226%20passing-brightgreen)
+![Coverage](https://img.shields.io/badge/coverage-100%25-brightgreen)
 ![License](https://img.shields.io/badge/license-GPLv3-lightgrey)
 
 ---
