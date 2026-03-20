@@ -24,7 +24,6 @@ from chainvalidator.reporter import (
     print_verdict,
 )
 
-
 # ---------------------------------------------------------------------------
 # Helper: capture Rich output into a string
 # ---------------------------------------------------------------------------
@@ -280,6 +279,29 @@ class TestPrintLeaf:
         assert "no A records" in out
         # Must NOT show the generic missing-record fallback
         assert "No A records found" not in out
+
+    def test_leaf_nodata_true_shows_secure_message_regardless_of_status(self):
+        """nodata=True always renders the secure NODATA line.
+
+        The insecure-NODATA else-branch was removed from reporter.py because
+        _validate_nsec3_nodata never produces nodata=True with a non-SECURE
+        status — it either sets BOGUS and returns False (nodata stays False)
+        or sets SECURE and returns True.  There is therefore only one reachable
+        nodata=True path and no else branch to test.
+        """
+        report = DNSSECReport(domain="example.com")
+        report.leaf = LeafResult(
+            qname="example.com",
+            record_type="AAAA",
+            nodata=True,
+            status=Status.SECURE,
+            notes=[
+                "Secure NODATA: example.com exists but has no AAAA records (NSEC3 proof validated)"
+            ],
+        )
+        out = _capture(print_leaf, report)
+        assert "Secure NODATA" in out
+        assert "No AAAA records found" not in out
 
     def test_leaf_nodata_false_no_records_shows_generic(self):
         """nodata=False, nxdomain=False, no records → generic fallback message."""

@@ -187,8 +187,6 @@ def print_leaf(report: DNSSECReport) -> None:
                 f"  [green]✔[/green]  [bold]{leaf.qname}[/bold] has no "
                 f"{leaf.record_type} records (secure NODATA — NSEC3 proof validated)"
             )
-        else:
-            console.print(f"  [dim]No {leaf.record_type} records found (NODATA).[/dim]")
     else:
         console.print(
             f"  [dim]No {leaf.record_type} records found (NODATA or NXDOMAIN).[/dim]"
