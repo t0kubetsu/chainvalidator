@@ -1845,7 +1845,8 @@ class TestValidateNsec3Nodata:
         return rr
 
     def _compute_hash(self, name: str) -> tuple[str, bytes]:
-        import base64, hashlib
+        import base64
+        import hashlib
 
         _B32_STD = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"
         _B32_HEX = "0123456789ABCDEFGHIJKLMNOPQRSTUV"
@@ -2045,9 +2046,6 @@ class TestHandleNegativeResponseNsec3Nodata:
         c = self._checker_with_ns_map()
         dnskeys = make_dnskey_rrset("example.com.")
         resp = make_response("example.com.", dns.rdatatype.A)
-
-        # Patch _validate_nsec3_nodata to simulate a successful proof
-        from chainvalidator.models import LeafResult
 
         def fake_nodata(raw_resp, zone, zone_dnskeys, qname, rdtype_text, leaf):
             leaf.nodata = True
