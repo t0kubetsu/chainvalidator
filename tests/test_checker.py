@@ -1902,7 +1902,7 @@ class TestValidateNsec3Nodata:
         dnskeys = make_dnskey_rrset("example.com.")
         qname_b32, qname_raw = self._compute_hash("example.com.")
 
-        nsec3_rr = self._make_nsec3_rr(qname_b32, b" " * 20)
+        nsec3_rr = self._make_nsec3_rr(qname_b32, b"\x00" * 20)
         # No RRSIG added to authority
         resp = make_response("example.com.", dns.rdatatype.A)
         resp.authority.append(nsec3_rr)
@@ -1924,7 +1924,7 @@ class TestValidateNsec3Nodata:
         dnskeys = make_dnskey_rrset("example.com.")
         qname_b32, qname_raw = self._compute_hash("example.com.")
 
-        nsec3_rr = self._make_nsec3_rr(qname_b32, b" " * 20)
+        nsec3_rr = self._make_nsec3_rr(qname_b32, b"\x00" * 20)
         rrsig_r = make_rrsig_rrset(
             f"{qname_b32}.example.com.", type_covered=dns.rdatatype.NSEC3
         )
@@ -1954,7 +1954,7 @@ class TestValidateNsec3Nodata:
         qname_b32, qname_raw = self._compute_hash("example.com.")
 
         # include_a=True → A bit set in bitmap
-        nsec3_rr = self._make_nsec3_rr(qname_b32, b" " * 20, include_a=True)
+        nsec3_rr = self._make_nsec3_rr(qname_b32, b"\x00" * 20, include_a=True)
         rrsig_r = make_rrsig_rrset(
             f"{qname_b32}.example.com.", type_covered=dns.rdatatype.NSEC3
         )
@@ -1983,7 +1983,7 @@ class TestValidateNsec3Nodata:
         qname_b32, qname_raw = self._compute_hash("example.com.")
 
         # include_a=False → A bit NOT set; proof is valid
-        nsec3_rr = self._make_nsec3_rr(qname_b32, b" " * 20, include_a=False)
+        nsec3_rr = self._make_nsec3_rr(qname_b32, b"\x00" * 20, include_a=False)
         rrsig_r = make_rrsig_rrset(
             f"{qname_b32}.example.com.", type_covered=dns.rdatatype.NSEC3
         )
