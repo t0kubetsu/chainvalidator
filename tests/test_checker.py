@@ -1803,6 +1803,278 @@ class TestNodataNsecSoaBranch:
 
 
 # ---------------------------------------------------------------------------
+# _validate_nsec3_nodata: NOERROR + NSEC3 proof of type non-existence
+# ---------------------------------------------------------------------------
+
+
+class TestValidateNsec3Nodata:
+    """Tests for _validate_nsec3_nodata (RFC 5155 §8.5 NODATA proof)."""
+
+    def _checker(self):
+        c = _make_checker("example.com")
+        c._zone_ns_map = {"example.com.": [("ns1.", "1.2.3.4")]}
+        return c
+
+    def _make_nsec3_rr(
+        self,
+        owner_hash_b32hex: str,
+        next_raw: bytes,
+        zone: str = "example.com.",
+        include_a: bool = False,
+    ) -> dns.rrset.RRset:
+        """Build an NSEC3 RRset.  If include_a=True the A type bit is set in the bitmap."""
+        import struct
+
+        owner_name = dns.name.from_text(f"{owner_hash_b32hex}.{zone}")
+        rr = dns.rrset.RRset(owner_name, dns.rdataclass.IN, dns.rdatatype.NSEC3)
+        rr.update_ttl(300)
+        nsec3_wire = struct.pack(
+            "!BBHB", 1, 0, 0, 0
+        )  # alg=1, flags=0, iter=0, saltlen=0
+        nsec3_wire += struct.pack("!B", 20) + next_raw  # hashlen=20, next_hash
+        if include_a:
+            # window 0, length 1: bit 1 (A) set → 0x40
+            nsec3_wire += struct.pack("!BB", 0, 1) + bytes([0x40])
+        else:
+            # window 0: only SOA (bit 6) set → 0x02
+            nsec3_wire += struct.pack("!BB", 0, 1) + bytes([0x02])
+        rdata = dns.rdata.from_wire(
+            dns.rdataclass.IN, dns.rdatatype.NSEC3, nsec3_wire, 0, len(nsec3_wire)
+        )
+        rr.add(rdata)
+        return rr
+
+    def _compute_hash(self, name: str) -> tuple[str, bytes]:
+        import base64, hashlib
+
+        _B32_STD = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"
+        _B32_HEX = "0123456789ABCDEFGHIJKLMNOPQRSTUV"
+        to_hex = str.maketrans(_B32_STD, _B32_HEX)
+        wire = dns.name.from_text(name).canonicalize().to_wire()
+        d = hashlib.sha1(wire).digest()
+        return base64.b32encode(d).decode().upper().rstrip("=").translate(to_hex), d
+
+    def test_no_nsec3_records_fails(self):
+        """Empty authority → no NSEC3 records → _fail."""
+        c = self._checker()
+        dnskeys = make_dnskey_rrset("example.com.")
+        resp = make_response("example.com.", dns.rdatatype.A)
+        from chainvalidator.models import LeafResult
+
+        leaf = LeafResult(qname="example.com", record_type="A")
+        result = c._validate_nsec3_nodata(
+            resp, "example.com.", dnskeys, "example.com.", "A", leaf
+        )
+        assert result is False
+        assert leaf.status == Status.BOGUS
+        assert any("No NSEC3 records found" in e for e in c.errors)
+
+    def test_no_matching_owner_hash_fails(self):
+        """NSEC3 present but no record matches the qname hash → _fail."""
+        c = self._checker()
+        dnskeys = make_dnskey_rrset("example.com.")
+
+        # Use a hash for a completely unrelated name
+        unrel_b32, unrel_raw = self._compute_hash("unrelated.zone.")
+        nsec3_rr = self._make_nsec3_rr(unrel_b32, unrel_raw)
+        rrsig_r = make_rrsig_rrset(
+            f"{unrel_b32}.example.com.", type_covered=dns.rdatatype.NSEC3
+        )
+
+        resp = make_response("example.com.", dns.rdatatype.A)
+        resp.authority.append(nsec3_rr)
+        resp.authority.append(rrsig_r)
+
+        from chainvalidator.models import LeafResult
+
+        leaf = LeafResult(qname="example.com", record_type="A")
+
+        result = c._validate_nsec3_nodata(
+            resp, "example.com.", dnskeys, "example.com.", "A", leaf
+        )
+        assert result is False
+        assert leaf.status == Status.BOGUS
+        assert any("cannot prove" in e for e in c.errors)
+
+    def test_no_rrsig_over_matching_nsec3_fails(self):
+        """Matching NSEC3 owner hash found but no RRSIG → _fail."""
+        c = self._checker()
+        dnskeys = make_dnskey_rrset("example.com.")
+        qname_b32, qname_raw = self._compute_hash("example.com.")
+
+        nsec3_rr = self._make_nsec3_rr(qname_b32, b" " * 20)
+        # No RRSIG added to authority
+        resp = make_response("example.com.", dns.rdatatype.A)
+        resp.authority.append(nsec3_rr)
+
+        from chainvalidator.models import LeafResult
+
+        leaf = LeafResult(qname="example.com", record_type="A")
+
+        result = c._validate_nsec3_nodata(
+            resp, "example.com.", dnskeys, "example.com.", "A", leaf
+        )
+        assert result is False
+        assert leaf.status == Status.BOGUS
+        assert any("No RRSIG" in e for e in c.errors)
+
+    def test_rrsig_validation_fails(self):
+        """Matching NSEC3 + RRSIG present but RRSIG invalid → _fail."""
+        c = self._checker()
+        dnskeys = make_dnskey_rrset("example.com.")
+        qname_b32, qname_raw = self._compute_hash("example.com.")
+
+        nsec3_rr = self._make_nsec3_rr(qname_b32, b" " * 20)
+        rrsig_r = make_rrsig_rrset(
+            f"{qname_b32}.example.com.", type_covered=dns.rdatatype.NSEC3
+        )
+        resp = make_response("example.com.", dns.rdatatype.A)
+        resp.authority.append(nsec3_rr)
+        resp.authority.append(rrsig_r)
+
+        from chainvalidator.models import LeafResult
+
+        leaf = LeafResult(qname="example.com", record_type="A")
+
+        with patch(
+            "chainvalidator.checker.validate_rrsig_over_rrset",
+            return_value=(False, None),
+        ):
+            result = c._validate_nsec3_nodata(
+                resp, "example.com.", dnskeys, "example.com.", "A", leaf
+            )
+        assert result is False
+        assert leaf.status == Status.BOGUS
+        assert any("could not be validated" in e for e in c.errors)
+
+    def test_bitmap_includes_type_fails(self):
+        """NSEC3 bitmap includes the queried type → bogus (type exists but no answer)."""
+        c = self._checker()
+        dnskeys = make_dnskey_rrset("example.com.")
+        qname_b32, qname_raw = self._compute_hash("example.com.")
+
+        # include_a=True → A bit set in bitmap
+        nsec3_rr = self._make_nsec3_rr(qname_b32, b" " * 20, include_a=True)
+        rrsig_r = make_rrsig_rrset(
+            f"{qname_b32}.example.com.", type_covered=dns.rdatatype.NSEC3
+        )
+        resp = make_response("example.com.", dns.rdatatype.A)
+        resp.authority.append(nsec3_rr)
+        resp.authority.append(rrsig_r)
+
+        from chainvalidator.models import LeafResult
+
+        leaf = LeafResult(qname="example.com", record_type="A")
+
+        with patch(
+            "chainvalidator.checker.validate_rrsig_over_rrset", return_value=(True, 42)
+        ):
+            result = c._validate_nsec3_nodata(
+                resp, "example.com.", dnskeys, "example.com.", "A", leaf
+            )
+        assert result is False
+        assert leaf.status == Status.BOGUS
+        assert any("NSEC3 bitmap includes" in e for e in c.errors)
+
+    def test_success_no_a_record_proven(self):
+        """Valid NSEC3 NODATA proof: A type absent from bitmap → SECURE."""
+        c = self._checker()
+        dnskeys = make_dnskey_rrset("example.com.")
+        qname_b32, qname_raw = self._compute_hash("example.com.")
+
+        # include_a=False → A bit NOT set; proof is valid
+        nsec3_rr = self._make_nsec3_rr(qname_b32, b" " * 20, include_a=False)
+        rrsig_r = make_rrsig_rrset(
+            f"{qname_b32}.example.com.", type_covered=dns.rdatatype.NSEC3
+        )
+        resp = make_response("example.com.", dns.rdatatype.A)
+        resp.authority.append(nsec3_rr)
+        resp.authority.append(rrsig_r)
+
+        from chainvalidator.models import LeafResult
+
+        leaf = LeafResult(qname="example.com", record_type="A")
+
+        with patch(
+            "chainvalidator.checker.validate_rrsig_over_rrset", return_value=(True, 42)
+        ):
+            result = c._validate_nsec3_nodata(
+                resp, "example.com.", dnskeys, "example.com.", "A", leaf
+            )
+        assert result is True
+        assert leaf.status == Status.SECURE
+        assert leaf.nodata is True
+        assert any("Secure NODATA" in n for n in leaf.notes)
+        assert c.errors == []
+        assert c.warnings == []
+
+
+class TestHandleNegativeResponseNsec3Nodata:
+    """Tests for the NSEC3 NODATA dispatch branch in _handle_negative_response."""
+
+    def _checker_with_ns_map(self):
+        c = _make_checker("example.com")
+        c._zone_ns_map = {"example.com.": [("ns1.example.com.", "1.2.3.4")]}
+        return c
+
+    def test_nsec3_nodata_dispatched_and_secure(self):
+        """NOERROR + NSEC3 in authority (no NSEC) → _validate_nsec3_nodata called."""
+        c = self._checker_with_ns_map()
+        dnskeys = make_dnskey_rrset("example.com.")
+
+        # Build a NOERROR response with a mock NSEC3 record (no direct answer)
+        resp = make_response("example.com.", dns.rdatatype.A)
+        nsec3_mock = MagicMock()
+        nsec3_mock.rdtype = dns.rdatatype.NSEC3
+        resp.authority.append(nsec3_mock)
+
+        with patch("chainvalidator.checker.udp_query", return_value=resp):
+            with patch.object(
+                c, "_validate_nsec3_nodata", return_value=True
+            ) as mock_nodata:
+                result = c._check_final_rrset("example.com.", dnskeys)
+
+        mock_nodata.assert_called_once()
+        assert result is True
+
+    def test_nsec3_nodata_full_secure_path(self):
+        """
+        Full integration: NOERROR + real NSEC3 NODATA proof → SECURE, no errors,
+        leaf.nodata=True, leaf.status=SECURE.
+        """
+        c = self._checker_with_ns_map()
+        dnskeys = make_dnskey_rrset("example.com.")
+        resp = make_response("example.com.", dns.rdatatype.A)
+
+        # Patch _validate_nsec3_nodata to simulate a successful proof
+        from chainvalidator.models import LeafResult
+
+        def fake_nodata(raw_resp, zone, zone_dnskeys, qname, rdtype_text, leaf):
+            leaf.nodata = True
+            leaf.status = Status.SECURE
+            leaf.notes.append(
+                f"Secure NODATA: {qname} exists but has no {rdtype_text} records "
+                f"(NSEC3 proof validated)"
+            )
+            return True
+
+        nsec3_mock = MagicMock()
+        nsec3_mock.rdtype = dns.rdatatype.NSEC3
+        resp.authority.append(nsec3_mock)
+
+        with patch("chainvalidator.checker.udp_query", return_value=resp):
+            with patch.object(c, "_validate_nsec3_nodata", side_effect=fake_nodata):
+                result = c._check_final_rrset("example.com.", dnskeys)
+
+        assert result is True
+        assert c.errors == []
+        assert c.warnings == []
+        assert c.report.leaf is not None
+        assert c.report.leaf.nodata is True
+        assert c.report.leaf.status == Status.SECURE
+
+
+# ---------------------------------------------------------------------------
 # _validate_nxdomain: NSEC3 failing path (lines 1196-1201)
 # ---------------------------------------------------------------------------
 

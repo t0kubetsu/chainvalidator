@@ -157,14 +157,12 @@ def print_leaf(report: DNSSECReport) -> None:
         console.print("  [dim]Chain validation did not reach the leaf record.[/dim]")
         return
 
-    # CNAME chain
     if leaf.cname_chain:
         console.print(
             f"  [dim]CNAME chain:[/dim] {report.domain}"
             + "".join(f"  →  {c}" for c in leaf.cname_chain)
         )
 
-    # Records
     if leaf.records:
         tbl = Table(show_header=False, box=None, padding=(0, 1))
         tbl.add_column("RR", style="dim", no_wrap=True)
@@ -183,19 +181,25 @@ def print_leaf(report: DNSSECReport) -> None:
                 f"  [yellow]⚠[/yellow]  [bold]{leaf.qname}[/bold] does not exist "
                 f"(NXDOMAIN — no signed denial proof available)"
             )
+    elif leaf.nodata:
+        if leaf.status is Status.SECURE:
+            console.print(
+                f"  [green]✔[/green]  [bold]{leaf.qname}[/bold] has no "
+                f"{leaf.record_type} records (secure NODATA — NSEC3 proof validated)"
+            )
+        else:
+            console.print(f"  [dim]No {leaf.record_type} records found (NODATA).[/dim]")
     else:
         console.print(
             f"  [dim]No {leaf.record_type} records found (NODATA or NXDOMAIN).[/dim]"
         )
 
-    # RRSIG info
     if leaf.rrsig_used:
         rrsig_line = f"RRSIG validated with DNSKEY={leaf.rrsig_used}"
         if leaf.rrsig_expires:
             rrsig_line += f"  (expires {leaf.rrsig_expires})"
         console.print(f"  [green]{rrsig_line}[/green]")
 
-    # Notes / warnings / errors
     for note in leaf.notes:
         console.print(f"  [cyan]ℹ[/cyan]  {note}")
     for warn in leaf.warnings:

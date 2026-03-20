@@ -71,6 +71,7 @@ class TestLeafResult:
         assert leaf.rrsig_expires == ""
         assert leaf.cname_chain == []
         assert leaf.nxdomain is False
+        assert leaf.nodata is False
         assert leaf.status == Status.SECURE
         assert leaf.errors == []
         assert leaf.warnings == []
@@ -89,6 +90,20 @@ class TestLeafResult:
         b = LeafResult(qname="b.example.com", record_type="A")
         a.nxdomain = True
         assert b.nxdomain is False
+
+    def test_nodata_default_is_false(self):
+        leaf = LeafResult(qname="example.com", record_type="A")
+        assert leaf.nodata is False
+
+    def test_nodata_can_be_set_true(self):
+        leaf = LeafResult(qname="example.com", record_type="A", nodata=True)
+        assert leaf.nodata is True
+
+    def test_nodata_mutable_defaults_are_independent(self):
+        a = LeafResult(qname="a.example.com", record_type="A")
+        b = LeafResult(qname="b.example.com", record_type="A")
+        a.nodata = True
+        assert b.nodata is False
 
     def test_set_fields(self):
         leaf = LeafResult(
@@ -116,6 +131,23 @@ class TestLeafResult:
         assert leaf.nxdomain is True
         assert leaf.status == Status.SECURE
         assert any("Secure NXDOMAIN" in n for n in leaf.notes)
+        assert leaf.warnings == []
+        assert leaf.errors == []
+
+    def test_secure_nodata_leaf(self):
+        """A proven NODATA (NSEC3) should be SECURE with nodata=True and a note."""
+        leaf = LeafResult(
+            qname="www.example.com",
+            record_type="A",
+            nodata=True,
+            status=Status.SECURE,
+            notes=[
+                "Secure NODATA: www.example.com exists but has no A records (NSEC3 proof validated)"
+            ],
+        )
+        assert leaf.nodata is True
+        assert leaf.status == Status.SECURE
+        assert any("NODATA" in n for n in leaf.notes)
         assert leaf.warnings == []
         assert leaf.errors == []
 

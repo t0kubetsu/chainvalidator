@@ -262,6 +262,38 @@ class TestPrintLeaf:
         # The insecure "no signed denial proof" phrase must be absent.
         assert "no signed denial" not in out
 
+    def test_leaf_secure_nodata(self):
+        """nodata=True + Status.SECURE → secure NODATA message."""
+        report = DNSSECReport(domain="example.com")
+        report.leaf = LeafResult(
+            qname="example.com",
+            record_type="A",
+            nodata=True,
+            status=Status.SECURE,
+            notes=[
+                "Secure NODATA: example.com exists but has no A records (NSEC3 proof validated)"
+            ],
+        )
+        out = _capture(print_leaf, report)
+        # Short substrings safe from Rich line-wrapping
+        assert "Secure NODATA" in out
+        assert "no A records" in out
+        # Must NOT show the generic missing-record fallback
+        assert "No A records found" not in out
+
+    def test_leaf_nodata_false_no_records_shows_generic(self):
+        """nodata=False, nxdomain=False, no records → generic fallback message."""
+        report = DNSSECReport(domain="example.com")
+        report.leaf = LeafResult(
+            qname="example.com",
+            record_type="A",
+            records=[],
+            nodata=False,
+            nxdomain=False,
+        )
+        out = _capture(print_leaf, report)
+        assert "No A records found" in out
+
     def test_leaf_with_notes_warnings_errors(self):
         report = DNSSECReport(domain="example.com")
         report.leaf = LeafResult(
@@ -378,6 +410,31 @@ class TestPrintFullReport:
         )
         out = _capture(print_full_report, report)
         assert "chain broken" in out
+
+    def test_full_report_secure_nodata(self):
+        """Full report for a domain that resolves to a secure NODATA (no A record)."""
+        report = DNSSECReport(
+            domain="example.com",
+            status=Status.SECURE,
+            trust_anchor_keys=["DS=20326/SHA-256"],
+        )
+        report.chain.append(ChainLink(zone="."))
+        report.chain.append(ChainLink(zone="com."))
+        report.chain.append(ChainLink(zone="example.com."))
+        report.leaf = LeafResult(
+            qname="example.com",
+            record_type="A",
+            nodata=True,
+            status=Status.SECURE,
+            notes=[
+                "Secure NODATA: example.com exists but has no A records (NSEC3 proof validated)"
+            ],
+        )
+        out = _capture(print_full_report, report)
+        assert "example.com" in out
+        assert "successfully" in out
+        assert "Secure NODATA" in out
+        assert "NOT fully anchored" not in out
 
     def test_full_report_secure_nxdomain(self):
         """Full report for a domain that resolves to a secure NXDOMAIN."""

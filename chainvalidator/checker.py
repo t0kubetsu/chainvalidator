@@ -1094,6 +1094,14 @@ class DNSSECChecker:
         if raw_resp.rcode() == dns.rcode.NXDOMAIN:
             return self._validate_nxdomain(raw_resp, zone, zone_dnskeys, qname, leaf)
 
+        nsec3_rrs = [
+            rr for rr in raw_resp.authority if rr.rdtype == dns.rdatatype.NSEC3
+        ]
+        if nsec3_rrs and raw_resp.rcode() == dns.rcode.NOERROR:
+            return self._validate_nsec3_nodata(
+                raw_resp, zone, zone_dnskeys, qname, rdtype_text, leaf
+            )
+
         msg = f"No {rdtype_text} record for {qname}"
         logger.error("  %s No %s record found for %s", RED, rdtype_text, qname)
         self._fail(msg)
@@ -1203,6 +1211,129 @@ class DNSSECChecker:
                 leaf.errors.append(msg)
                 return False
 
+        return True
+
+    def _validate_nsec3_nodata(
+        self,
+        raw_resp: dns.message.Message,
+        zone: str,
+        zone_dnskeys: dns.rrset.RRset,
+        qname: str,
+        rdtype_text: str,
+        leaf: LeafResult,
+    ) -> bool:
+        """Validate an NSEC3 NODATA proof for a NOERROR/no-answer response (RFC 5155 §8.5).
+
+        A NODATA response means the owner name exists but the requested type does
+        not.  The proof is a single NSEC3 record whose owner hash matches the hash
+        of *qname* and whose type bitmap does not include the queried type.
+
+        :param raw_resp: The full DNS response message.
+        :param zone: Authoritative zone name.
+        :param zone_dnskeys: Trusted keys for *zone*.
+        :param qname: The queried name.
+        :param rdtype_text: Human-readable RR type.
+        :param leaf: :class:`LeafResult` updated in-place.
+        :returns: ``True`` if the proof is valid.
+        :rtype: bool
+        """
+        logger.info("  Checking NSEC3 NODATA proof for %s %s", qname, rdtype_text)
+
+        nsec3_map: dict = {}
+        nsec3_rrsigs: dict = {}
+        for rr in raw_resp.authority:
+            if rr.rdtype == dns.rdatatype.NSEC3:
+                h = nsec3_owner_hash(rr, zone)
+                nsec3_map[h] = (rr, list(rr)[0])
+            elif rr.rdtype == dns.rdatatype.RRSIG:
+                for sig in rr:
+                    if sig.type_covered == dns.rdatatype.NSEC3:
+                        h = nsec3_owner_hash(rr, zone)
+                        nsec3_rrsigs[h] = rr
+
+        if not nsec3_map:
+            msg = f"No NSEC3 records found in NODATA response for {qname} {rdtype_text}"
+            self._fail(msg)
+            leaf.status = Status.BOGUS
+            leaf.errors.append(msg)
+            return False
+
+        first_rd = next(iter(nsec3_map.values()))[1]
+        iterations = first_rd.iterations
+        salt_hex = first_rd.salt.hex() if first_rd.salt else "-"
+        logger.debug("  NSEC3 parameters: iterations=%d, salt=%s", iterations, salt_hex)
+
+        qname_hash = nsec3_hash(
+            qname if qname.endswith(".") else qname + ".", salt_hex, iterations
+        )
+        logger.debug("  NSEC3 hash of %s = %s", qname, qname_hash)
+
+        if qname_hash not in nsec3_map:
+            msg = (
+                f"No NSEC3 record matches owner hash of {qname} "
+                f"-- cannot prove {rdtype_text} NODATA"
+            )
+            self._fail(msg)
+            leaf.status = Status.BOGUS
+            leaf.errors.append(msg)
+            return False
+
+        matching_rrset, matching_rd = nsec3_map[qname_hash]
+
+        rrsig = nsec3_rrsigs.get(qname_hash)
+        if not rrsig:
+            msg = f"No RRSIG over NSEC3 record for {qname}"
+            self._fail(msg)
+            leaf.status = Status.BOGUS
+            leaf.errors.append(msg)
+            return False
+
+        ok, key_tag = validate_rrsig_over_rrset(
+            matching_rrset, rrsig, zone_dnskeys, zone
+        )
+        if not ok:
+            msg = f"RRSIG over NSEC3 record for {qname} could not be validated"
+            self._fail(msg)
+            leaf.status = Status.BOGUS
+            leaf.errors.append(msg)
+            return False
+
+        logger.info(
+            "  %s %s and DNSKEY=%s verifies NSEC3 RRset (NODATA proof for %s)",
+            GREEN,
+            fmt_rrsig(rrsig[0]),
+            key_tag,
+            qname,
+        )
+
+        rdtype_val = int(self.rdtype)
+        window_num = rdtype_val >> 8
+        bit_index = rdtype_val & 0xFF
+        type_in_bitmap = False
+        for win, bitmap in matching_rd.windows:
+            if win == window_num:
+                byte_idx, bit_pos = divmod(bit_index, 8)
+                if byte_idx < len(bitmap) and bitmap[byte_idx] & (0x80 >> bit_pos):
+                    type_in_bitmap = True
+
+        if type_in_bitmap:
+            msg = (
+                f"NSEC3 bitmap includes {rdtype_text} but no answer was returned "
+                f"for {qname}"
+            )
+            self._fail(msg)
+            leaf.status = Status.BOGUS
+            leaf.errors.append(msg)
+            return False
+
+        note = (
+            f"Secure NODATA: {qname} exists but has no {rdtype_text} records "
+            f"(NSEC3 proof validated)"
+        )
+        logger.info("  %s %s", GREEN, note)
+        leaf.notes.append(note)
+        leaf.nodata = True
+        leaf.status = Status.SECURE
         return True
 
     def _validate_nxdomain(
