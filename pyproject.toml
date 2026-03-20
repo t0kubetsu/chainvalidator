@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "DNSSEC chain-of-trust validator – CLI utility and Python library"
 readme = "README.md"
 requires-python = ">=3.11"
-license = "GPLv3"
+license = "GPL-3.0"
 license-files = ["LICENSE"]
 authors = [{ name = "t0kubetsu" }]
 keywords = [
@@ -36,7 +36,6 @@ classifiers = [
     "Intended Audience :: Developers",
     "Intended Audience :: System Administrators",
     "Intended Audience :: Information Technology",
-    "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
