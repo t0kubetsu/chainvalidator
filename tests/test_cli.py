@@ -174,3 +174,106 @@ class TestCLICheck:
         result = runner.invoke(app, ["check", "example.com", "--type", "NOTATYPE"])
         # Typer reports bad parameter as exit code 2
         assert result.exit_code != 0
+
+
+# ---------------------------------------------------------------------------
+# CLI: check --output flag
+# ---------------------------------------------------------------------------
+
+
+class TestCLICheckOutput:
+    """Tests for the ``--output / -o`` export flag on ``chainvalidator check``."""
+
+    def _make_report(self, status: Status = Status.SECURE) -> DNSSECReport:
+        return DNSSECReport(domain="example.com", record_type="A", status=status)
+
+    def test_output_txt_calls_save_report(self, tmp_path):
+        """--output FILE.txt calls save_report with the correct path."""
+        dest = str(tmp_path / "out.txt")
+        report = self._make_report()
+        with (
+            patch("chainvalidator.cli.assess", return_value=report),
+            patch("chainvalidator.cli.print_full_report"),
+            patch("chainvalidator.cli.save_report") as mock_save,
+        ):
+            result = runner.invoke(app, ["check", "example.com", "--output", dest])
+        assert result.exit_code == 0
+        mock_save.assert_called_once_with(dest)
+
+    def test_output_svg_calls_save_report(self, tmp_path):
+        dest = str(tmp_path / "out.svg")
+        report = self._make_report()
+        with (
+            patch("chainvalidator.cli.assess", return_value=report),
+            patch("chainvalidator.cli.print_full_report"),
+            patch("chainvalidator.cli.save_report") as mock_save,
+        ):
+            result = runner.invoke(app, ["check", "example.com", "--output", dest])
+        assert result.exit_code == 0
+        mock_save.assert_called_once_with(dest)
+
+    def test_output_html_calls_save_report(self, tmp_path):
+        dest = str(tmp_path / "out.html")
+        report = self._make_report()
+        with (
+            patch("chainvalidator.cli.assess", return_value=report),
+            patch("chainvalidator.cli.print_full_report"),
+            patch("chainvalidator.cli.save_report") as mock_save,
+        ):
+            result = runner.invoke(app, ["check", "example.com", "--output", dest])
+        assert result.exit_code == 0
+        mock_save.assert_called_once_with(dest)
+
+    def test_output_value_error_exits_1(self, tmp_path):
+        """ValueError from save_report (bad extension) must exit with code 1."""
+        dest = str(tmp_path / "out.pdf")
+        report = self._make_report()
+        with (
+            patch("chainvalidator.cli.assess", return_value=report),
+            patch("chainvalidator.cli.print_full_report"),
+            patch(
+                "chainvalidator.cli.save_report",
+                side_effect=ValueError("Unsupported export format"),
+            ),
+        ):
+            result = runner.invoke(app, ["check", "example.com", "--output", dest])
+        assert result.exit_code == 1
+
+    def test_output_oserror_exits_1(self, tmp_path):
+        """OSError from save_report (e.g. permission denied) must exit with code 1."""
+        dest = str(tmp_path / "out.txt")
+        report = self._make_report()
+        with (
+            patch("chainvalidator.cli.assess", return_value=report),
+            patch("chainvalidator.cli.print_full_report"),
+            patch(
+                "chainvalidator.cli.save_report",
+                side_effect=OSError("permission denied"),
+            ),
+        ):
+            result = runner.invoke(app, ["check", "example.com", "--output", dest])
+        assert result.exit_code == 1
+
+    def test_no_output_does_not_call_save_report(self):
+        """When --output is omitted, save_report is never called."""
+        report = self._make_report()
+        with (
+            patch("chainvalidator.cli.assess", return_value=report),
+            patch("chainvalidator.cli.print_full_report"),
+            patch("chainvalidator.cli.save_report") as mock_save,
+        ):
+            runner.invoke(app, ["check", "example.com"])
+        mock_save.assert_not_called()
+
+    def test_output_short_flag(self, tmp_path):
+        """-o is the short form of --output."""
+        dest = str(tmp_path / "out.txt")
+        report = self._make_report()
+        with (
+            patch("chainvalidator.cli.assess", return_value=report),
+            patch("chainvalidator.cli.print_full_report"),
+            patch("chainvalidator.cli.save_report") as mock_save,
+        ):
+            result = runner.invoke(app, ["check", "example.com", "-o", dest])
+        assert result.exit_code == 0
+        mock_save.assert_called_once_with(dest)

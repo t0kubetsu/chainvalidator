@@ -35,7 +35,7 @@ from chainvalidator.constants import (
     ROOT_SERVERS,
 )
 from chainvalidator.models import Status
-from chainvalidator.reporter import console, print_full_report
+from chainvalidator.reporter import console, print_full_report, save_report
 
 # ---------------------------------------------------------------------------
 # Typer application
@@ -165,6 +165,18 @@ def cmd_check(
             help="Per-query UDP/TCP timeout in seconds.",
         ),
     ] = DNS_TIMEOUT,
+    output: Annotated[
+        str | None,
+        typer.Option(
+            "--output",
+            "-o",
+            help=(
+                "Save the report to a file. "
+                "Format is inferred from the extension: "
+                ".txt for plain text, .svg for SVG, .html for HTML."
+            ),
+        ),
+    ] = None,
 ) -> None:
     """Validate the full DNSSEC chain of trust for DOMAIN.
 
@@ -205,6 +217,14 @@ def cmd_check(
             raise typer.Exit(code=1)
 
     print_full_report(report)
+
+    if output:
+        try:
+            save_report(output)
+            typer.echo(f"Report saved to {output}")
+        except (ValueError, OSError) as exc:
+            typer.echo(f"Error: {exc}", err=True)
+            raise typer.Exit(code=1)
 
     if report.status is Status.SECURE:
         raise typer.Exit(code=0)
