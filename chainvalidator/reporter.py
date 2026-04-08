@@ -14,11 +14,6 @@ from rich.table import Table
 from rich.text import Text
 
 from chainvalidator.models import ChainLink, DNSSECReport, Status
-from chainvalidator.verdict import (
-    VerdictAction,
-    VerdictSeverity,
-    extract_verdict_actions,
-)
 
 console = Console(record=True)
 
@@ -265,42 +260,35 @@ def print_leaf(report: DNSSECReport) -> None:
         console.print(f"  [red]✘[/red]  {err}")
 
 
-_SEV_STYLE: dict[VerdictSeverity, tuple[str, str]] = {
-    VerdictSeverity.CRITICAL: ("bold red", "✘ CRITICAL"),
-    VerdictSeverity.HIGH: ("bold yellow", "⚠ HIGH"),
-    VerdictSeverity.MEDIUM: ("bold cyan", "· MEDIUM"),
-}
+def print_verdict(report: DNSSECReport) -> None:
+    """Render the final verdict panel.
 
-
-def print_verdict(actions: list[VerdictAction]) -> None:
-    """Render the prioritised DNSSEC security verdict panel.
-
-    Displays a colour-coded table of actionable items sorted from most to
-    least urgent (``CRITICAL`` → ``HIGH`` → ``MEDIUM``).  Produces no output
-    when *actions* is empty (called by :func:`print_full_report` only when
-    there are issues to show).
-
-    :param actions: Deduplicated, severity-sorted action list from
-        :func:`~chainvalidator.verdict.extract_verdict_actions`.
-    :type actions: list[~chainvalidator.verdict.VerdictAction]
+    :param report: The full validation report.
+    :type report: ~chainvalidator.models.DNSSECReport
     """
-    if not actions:
-        return
+    style = _status_panel_style(report.status)
 
-    tbl = Table(show_header=True, header_style="bold red", expand=True, padding=(0, 1))
-    tbl.add_column("Priority", justify="center", no_wrap=True)
-    tbl.add_column("Action")
-    for action in actions:
-        style, label = _SEV_STYLE[action.severity]
-        tbl.add_row(Text(label, style=style), action.text)
-
-    console.print(
-        Panel(
-            "[bold red]Security Verdict[/bold red] – Prioritised Actions",
-            style="red",
+    lines: list[str] = []
+    if report.status is Status.SECURE:
+        lines.append(
+            f"✔  [bold green]{report.domain}[/bold green] — "
+            "full chain of trust validated successfully."
         )
-    )
-    console.print(tbl)
+    elif report.status is Status.INSECURE:
+        lines.append(
+            f"⚠   [bold yellow]{report.domain}[/bold yellow] — "
+            "chain is NOT fully anchored to the root trust anchor."
+        )
+        for w in report.warnings:
+            lines.append(f"    [yellow]•[/yellow] {w}")
+    else:
+        lines.append(
+            f"✘  [bold red]{report.domain}[/bold red] — DNSSEC validation FAILED."
+        )
+        for e in report.errors:
+            lines.append(f"    [red]•[/red] {e}")
+
+    console.print(Panel("\n".join(lines), title="Verdict", style=style))
 
 
 # ---------------------------------------------------------------------------
@@ -323,18 +311,5 @@ def print_full_report(report: DNSSECReport) -> None:
     print_trust_anchor(report)
     print_chain(report)
     print_leaf(report)
-
-    actions = extract_verdict_actions(report)
-    if actions:
-        print_verdict(actions)
-    else:
-        console.print(
-            Panel(
-                f"✔  [bold green]{report.domain}[/bold green] — "
-                "full chain of trust validated successfully.",
-                title="Verdict",
-                style="green",
-            )
-        )
-
+    print_verdict(report)
     console.rule("[dim]End of Report[/dim]")

@@ -27,7 +27,6 @@ from chainvalidator.reporter import (
     print_verdict,
     save_report,
 )
-from chainvalidator.verdict import VerdictAction, VerdictSeverity
 
 # ---------------------------------------------------------------------------
 # Helper: capture Rich output into a string
@@ -365,56 +364,50 @@ class TestPrintLeaf:
 
 
 class TestPrintVerdict:
-    def test_critical_action_shown(self):
-        actions = [
-            VerdictAction(
-                text="Fix sig mismatch at com.", severity=VerdictSeverity.CRITICAL, check_name="chain:com."
-            )
-        ]
-        out = _capture(print_verdict, actions)
-        assert "CRITICAL" in out
-        assert "Fix sig mismatch at com." in out
+    def test_secure_verdict(self):
+        report = DNSSECReport(domain="example.com", status=Status.SECURE)
+        out = _capture(print_verdict, report)
+        assert "example.com" in out
+        assert "successfully" in out
 
-    def test_high_action_shown(self):
-        actions = [
-            VerdictAction(
-                text="Add DS record at com.", severity=VerdictSeverity.HIGH, check_name="chain:com."
-            )
-        ]
-        out = _capture(print_verdict, actions)
-        assert "HIGH" in out
-        assert "Add DS record at com." in out
+    def test_insecure_verdict_shows_warnings(self):
+        report = DNSSECReport(
+            domain="example.com", status=Status.INSECURE, warnings=["no DS found"]
+        )
+        out = _capture(print_verdict, report)
+        assert "NOT fully anchored" in out
+        assert "no DS found" in out
 
-    def test_medium_action_shown(self):
-        actions = [
-            VerdictAction(
-                text="Advisory: weak algorithm", severity=VerdictSeverity.MEDIUM, check_name="chain:com."
-            )
-        ]
-        out = _capture(print_verdict, actions)
-        assert "MEDIUM" in out
+    def test_bogus_verdict_shows_errors(self):
+        report = DNSSECReport(
+            domain="example.com", status=Status.BOGUS, errors=["sig mismatch"]
+        )
+        out = _capture(print_verdict, report)
+        assert "FAILED" in out
+        assert "sig mismatch" in out
 
-    def test_empty_actions_produces_no_output(self):
-        out = _capture(print_verdict, [])
-        assert out.strip() == ""
+    def test_error_status_uses_bogus_branch(self):
+        report = DNSSECReport(
+            domain="example.com", status=Status.ERROR, errors=["network error"]
+        )
+        out = _capture(print_verdict, report)
+        assert "FAILED" in out
 
-    def test_verdict_panel_title_shown(self):
-        actions = [
-            VerdictAction(text="Fix something", severity=VerdictSeverity.CRITICAL, check_name="chain")
-        ]
-        out = _capture(print_verdict, actions)
-        assert "Verdict" in out
-
-    def test_multiple_severities_all_shown(self):
-        actions = [
-            VerdictAction(text="critical issue", severity=VerdictSeverity.CRITICAL, check_name="chain"),
-            VerdictAction(text="high issue", severity=VerdictSeverity.HIGH, check_name="chain"),
-            VerdictAction(text="medium issue", severity=VerdictSeverity.MEDIUM, check_name="chain"),
-        ]
-        out = _capture(print_verdict, actions)
-        assert "CRITICAL" in out
-        assert "HIGH" in out
-        assert "MEDIUM" in out
+    def test_secure_nxdomain_verdict_is_secure(self):
+        """A proven NXDOMAIN must produce a SECURE overall verdict."""
+        report = DNSSECReport(domain="www.example.com", status=Status.SECURE)
+        report.leaf = LeafResult(
+            qname="www.example.com",
+            record_type="A",
+            nxdomain=True,
+            status=Status.SECURE,
+            notes=[
+                "Secure NXDOMAIN: www.example.com does not exist (denial proof validated)"
+            ],
+        )
+        out = _capture(print_verdict, report)
+        assert "successfully" in out
+        assert "NOT fully anchored" not in out
 
 
 # ---------------------------------------------------------------------------
@@ -443,7 +436,6 @@ class TestPrintFullReport:
         )
         out = _capture(print_full_report, report)
         assert "chain broken" in out
-        assert "CRITICAL" in out
 
     def test_full_report_secure_nodata(self):
         """Full report for a domain that resolves to a secure NODATA (no A record)."""
