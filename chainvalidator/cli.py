@@ -97,6 +97,10 @@ def _validate_record_type(value: str) -> str:
     try:
         dns.rdatatype.from_text(value.upper())
     except Exception:
+        # Intentionally broad: dns.rdatatype.from_text raises different exception
+        # types depending on the dnspython version (dns.exception.SyntaxError,
+        # AttributeError, ValueError …). Any failure means the input is not a
+        # valid RR type, so we convert all of them to a user-facing BadParameter.
         raise typer.BadParameter(
             f"'{value}' is not a recognised DNS record type. "
             f"Common types: A, AAAA, MX, NS, TXT, CNAME"

@@ -42,6 +42,9 @@ def ds_matches_dnskey(ds: Rdata, dnskey: Rdata, zone: str) -> bool:
         computed = dns.dnssec.make_ds(zone, dnskey, ds.digest_type)
         return computed.digest == ds.digest
     except Exception:
+        # Intentionally broad: make_ds raises several exception types for
+        # unsupported digest algorithms, malformed records, or unknown zone
+        # names. Any failure means the DS does not match this DNSKEY.
         return False
 
 
@@ -75,6 +78,9 @@ def validate_rrsig_over_rrset(
             dns.dnssec.validate(rrset, rrsig_rrset, {zone_name: key_rrset})
             return True, key_tag
         except Exception:
+            # Intentionally broad: dns.dnssec.validate raises ValidationFailure,
+            # UnsupportedAlgorithm, and other types for any mismatch. We want
+            # to try the next key regardless of the specific failure reason.
             continue
     return False, None
 

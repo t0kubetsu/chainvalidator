@@ -145,7 +145,10 @@ class DNSSECChecker:
             record_type=record_type.upper(),
         )
 
-        # Internal NS map populated by _build_zone_list
+        # Internal NS cache populated by _build_zone_list and consumed during
+        # chain validation. Maps each zone name to a list of (hostname, ip)
+        # tuples for its authoritative name servers. Built once per check()
+        # call and treated as read-only after _build_zone_list returns.
         self._zone_ns_map: dict[str, list[tuple[str, str]]] = {}
 
     # ── Public entry point ────────────────────────────────────────────────────
@@ -857,7 +860,10 @@ class DNSSECChecker:
             leaf.errors.append(msg)
             return False
 
-        rrset = rrsig_rrset = cname_rrset = cname_rrsig = None
+        rrset = None        # RRset for the queried record type
+        rrsig_rrset = None  # RRSIG covering the queried RRset
+        cname_rrset = None  # CNAME RRset if a redirect was present
+        cname_rrsig = None  # RRSIG covering the CNAME RRset
 
         for rr in raw_resp.answer:
             if rr.rdtype == self.rdtype and rrset is None:
