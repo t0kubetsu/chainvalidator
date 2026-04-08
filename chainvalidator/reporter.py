@@ -14,7 +14,11 @@ from rich.table import Table
 from rich.text import Text
 
 from chainvalidator.models import ChainLink, DNSSECReport, Status
-from chainvalidator.verdict import VerdictAction, VerdictSeverity, extract_verdict_actions
+from chainvalidator.verdict import (
+    VerdictAction,
+    VerdictSeverity,
+    extract_verdict_actions,
+)
 
 console = Console(record=True)
 
@@ -292,7 +296,7 @@ def print_verdict(actions: list[VerdictAction]) -> None:
 
     console.print(
         Panel(
-            "[bold red]DNSSEC Security Verdict[/bold red] – Prioritised Actions",
+            "[bold red]Security Verdict[/bold red] – Prioritised Actions",
             style="red",
         )
     )
