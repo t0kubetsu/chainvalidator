@@ -3,6 +3,7 @@ __pycache__/
 *.py[cod]
 *.pyo
 *.pyd
+*.so
 .Python
 *.egg
 *.egg-info/
@@ -30,6 +31,7 @@ ENV/
 .pytest_cache/
 .coverage
 .coverage.*
+coverage.json
 htmlcov/
 *.xml
 junit/
@@ -41,7 +43,8 @@ junit/
 *.swo
 *~
 .DS_Store
+Thumbs.db
 
-# Distribution
-dist/
-build/
+# Claude Code
+.claude/
+.ecc

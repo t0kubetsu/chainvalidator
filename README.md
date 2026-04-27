@@ -33,6 +33,7 @@ $ chainvalidator check example.com
 - [Exit Codes](#exit-codes)
 - [Project Structure](#project-structure)
 - [Running Tests](#running-tests)
+- [Contributing](#contributing)
 
 ---
 
@@ -67,7 +68,7 @@ $ chainvalidator check example.com
 ## Installation
 
 ```bash
-git clone https://github.com/t0kubetsu/chainvalidator.git
+git clone https://github.com/NC3-TestingPlatform/chainvalidator.git
 cd chainvalidator
 python -m venv .venv
 source .venv/bin/activate
@@ -225,6 +226,17 @@ All DNS network I/O (`udp_query`, `get_dnskey`, `get_ds_from_parent`,
 `dns.resolver.resolve`) and the IANA trust anchor HTTP fetch (`requests.get`)
 are mocked at the boundary — no test touches a real nameserver or the
 internet.
+
+---
+
+## Contributing
+
+1. Fork the repository and create a feature branch.
+2. Add or update tests — the project targets 100% unit test coverage.
+3. Run `pytest` and confirm all tests pass before opening a pull request.
+4. Follow the existing docstring format (reStructuredText / docutils field lists).
+5. Use [conventional commits](https://www.conventionalcommits.org/):
+   `fix:`, `feat:`, `refactor:`, `test:`, `docs:`, `chore:`
 
 ---
 
