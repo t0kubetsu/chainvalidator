@@ -57,10 +57,10 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/t0kubetsu/chainvalidator"
-Repository = "https://github.com/t0kubetsu/chainvalidator"
-Issues = "https://github.com/t0kubetsu/chainvalidator/issues"
-# Changelog      = "https://github.com/t0kubetsu/chainvalidator/blob/main/CHANGELOG.md"
+Homepage = "https://github.com/NC3-TestingPlatform/chainvalidator"
+Repository = "https://github.com/NC3-TestingPlatform/chainvalidator"
+Issues = "https://github.com/NC3-TestingPlatform/chainvalidator/issues"
+Changelog = "https://github.com/NC3-TestingPlatform/chainvalidator/blob/main/CHANGELOG.md"
 
 [project.scripts]
 chainvalidator = "chainvalidator.cli:app"
