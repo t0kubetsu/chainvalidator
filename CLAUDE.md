@@ -67,3 +67,17 @@ tests/              ← pytest suite mirroring source structure
 - **Output formats:** inferred from file extension in `reporter.py:_FORMAT_BY_EXT`
 - **Commit style:** conventional commits (`feat:`, `fix:`, `refactor:`, `docs:`, `test:`)
 - **Root server selection:** `constants.pick_root_server()` uses `secrets.randbelow` — no `random`
+
+## Before Every Commit
+
+Run these checks and update these files as needed — do not skip any step:
+
+```bash
+# 1. Verify tests pass and coverage is still 100%
+pytest
+```
+
+Before pushing, update **CHANGELOG.md**: add your changes under `## [Unreleased]`
+using the standard sections (`### Added`, `### Changed`, `### Fixed`, `### Removed`).
+When bumping the version, move unreleased items to a new `## [x.y.z] — YYYY-MM-DD`
+section and update the comparison links at the bottom of `CHANGELOG.md`.
